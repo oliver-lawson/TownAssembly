@@ -1,150 +1,136 @@
-;linux syscalls
-%define SYS_WRITE	1
-%define SYS_EXIT	60
-%define SYS_IOCTL	16
-;linux file descriptors
-%define STDIN		0
-%define STDOUT		1
+
+global main
+default rel
+
+%include "sdl.inc.asm"
+
+%define WINDOW_WIDTH  640
+%define WINDOW_HEIGHT 480
 
 section .data
-    ; escape sequences
-    ; note - db is def byte(s) here, lays down as many bytes as given
-    clear_screen		db 0x1b, "[2J"
-    clear_screen_l		equ $ - clear_screen
-    cursor_to_topleft	db 0x1b, "[H"
-    cursor_to_topleft_l	equ $ - cursor_to_topleft
-    title_text 			db "Town Assembly"
-    title_text_l		equ $ - title_text
+	window_title        db "Town Assembly", 0
+
+	err_init_msg        db "SDL_Init failed", 10, 0
+	err_window_msg      db "SDL_CreateWindow failed", 10, 0
+	err_renderer_msg    db "SDL_CreateRenderer failed", 10, 0
 
 section .bss ; uninitialised buffers
-	winsize  resb 8		; 4x 16-bit values: rows,cols,xpixel,ypixel
-	cursor_x resb 2
-	cursor_y resb 2
-	cursor_pos_string resb 16
+	alignb 8
+	sdl_window		resq 1
+	sdl_renderer 	resq 1
+	sdl_event		resb SDL_EVENT_SIZE
 
 section .text ; begin!
-    global _start
 
-; ------------
-; start screen
-; ------------
-start_screen:
-	; set up screen
-	call get_terminal_size
-	
-	; clear screen
-	lea rsi, [clear_screen]
-	mov rdx, clear_screen_l
-	call print_string
-	lea rsi, [cursor_to_topleft]
-	mov rdx, cursor_to_topleft_l
-	call print_string
-	; position cursor in middle
-	mov rax, [winsize]
-	mov rbx, rax ; make a copy
-	and rax, 0xFFFF ; mask extract just the row
-	shr rbx, 16 ; shift down into bottom 16bits
-	and rbx, 0xFFFF ; mask extra the column
-	shr ax, 1
-	shr bx, 1
-	sub bx, title_text_l / 2 ;shl by half string l
-	mov r8, rax ;x
-	mov r9, rbx ;y
-	call set_cursor_pos
+main: ; stack alignment:
+	push rbp	 ; align stack to 16, "frame pointer" convention
+	mov rbp, rsp ; tell debugger where the frame is
+	; now do stuff
 
-	; write title text
-	lea rsi, [title_text]
-	mov rdx, title_text_l
-	call print_string
+	; setup SDL
+	mov edi, SDL_INIT_VIDEO
+	call SDL_Init
+	test eax, eax
+	jnz .fail_init
 
-	jmp quit_game
+	lea rdi, [window_title]
+	mov esi, SDL_WINDOWPOS_CENTERED
+	mov edx, SDL_WINDOWPOS_CENTERED
+	mov ecx, WINDOW_WIDTH
+	mov r8d, WINDOW_HEIGHT
+	mov r9d, SDL_WINDOW_SHOWN
+	call SDL_CreateWindow
+	test rax, rax
+	jz .fail_window
+	mov [sdl_window], rax ; store new pointer to window
 
-print_string:
-	mov rax, SYS_WRITE
-	mov rdi, STDOUT
-	syscall ; writes to rdi, with bytes at [rsi], for rdx num of bytes
-	; rax always means "which syscall"
-	; rdi,rsx,rdx are then the arg slots 0,1,2 and differ per syscall
-	; bytes must be in [rsi], not a register
+	mov rdi, [sdl_window]
+	mov esi, -1
+	call SDL_CreateRenderer
+	test rax, rax
+	jz .fail_renderer
+	mov [sdl_renderer], rax ; store pointer to renderer
+
+.main_loop:
+	; === event polling ===
+.poll_loop:
+	lea rdi, [sdl_event]
+	call SDL_PollEvent
+	test eax, eax
+	jz .poll_done	; queue empty
+
+	mov eax, [sdl_event + SDL_EVENT_TYPE_OFF]
+	cmp eax, SDL_QUIT_EVENT
+	je .cleanup
+	cmp eax, SDL_KEYDOWN_EVENT
+	jne .poll_loop	; not keydown, get next
+
+	mov eax, [sdl_event + SDL_EVENT_SCANCODE_OFF]
+	cmp eax, SCANCODE_ESCAPE
+	je .cleanup
+	jmp .poll_loop
+
+.poll_done:
+	; === render ===
+	mov rdi, [sdl_renderer]
+	call SDL_RenderClear
+
+	mov rdi, [sdl_renderer]
+	call SDL_RenderPresent
+
+	mov edi, 16 ; delay ms, even if we have vsync enabled
+	call SDL_Delay
+
+	jmp .main_loop
+
+.cleanup:
+	; === end main ===
+	mov rdi, [sdl_renderer]
+	call SDL_DestroyRenderer
+	mov rdi, [sdl_window]
+	call SDL_DestroyWindow
+	call SDL_Quit
+	leave 	; mov rsp,rbp and pop rbp to restore stack
+	ret		; returns to crt1.o which calls exit()
+
+.fail_init:
+	lea rdi, [err_init_msg]
+	call print_error
+	call SDL_Quit
+	mov eax, 1 ; exit code
+	leave
+	ret
+.fail_window:
+	lea rdi, [err_window_msg]
+	call print_error
+	call SDL_Quit
+	mov eax, 1
+	leave
+	ret
+.fail_renderer:
+	lea rdi, [err_renderer_msg]
+	call print_error
+	mov rdi, [sdl_window]
+	call SDL_DestroyWindow
+	call SDL_Quit
+	mov eax, 1
+	leave
 	ret
 
-get_terminal_size:
-	mov rax, SYS_IOCTL
-	mov rdi, STDOUT
-	mov rsi, 0x5413  ; TIOCGWINSZ
-	lea rdx, [winsize]
+print_error:
+	push rbp
+	mov rbp, rsp
+	mov rsi, rdi
+	xor rcx, rcx ; rsi, rcx are caller saved, can clobber
+.strlen:
+	cmp byte [rsi + rcx], 0
+	je .got_len
+	inc rcx
+	jmp .strlen
+.got_len:
+	mov rax, 1
+	mov rdx, rcx
+	mov rdi, 2
 	syscall
-	; winsize now contains [winsize]: rows(16bit) [winsize+2]: cols(16bit)
-	movzx eax, word [winsize] 	; rows
-	movzx ebx, word [winsize+2] ; cols
+	pop rbp
 	ret
-
-quit_game:
-	; before quit, cursor to tl so prompt draws there
-	lea rsi, [cursor_to_topleft]
-	mov rdx, cursor_to_topleft_l
-	call print_string
-
-	mov rax, SYS_EXIT
-    xor rdi, rdi
-    syscall
-
-set_cursor_pos:
-	; inputs  = r8: x, r9: y
-	lea rsi, [cursor_pos_string]
-	mov r10, rsi ; save start position
-	xor rax, rax ; ensure rax is cleared
-	mov byte [rsi], 0x1b
-	inc rsi
-	mov byte [rsi], '['
-	inc rsi
-
-	mov rax, r8 ; input x
-	call number_to_ascii_decimals
-
-	mov byte [rsi], ';'
-	inc rsi
-
-	mov rax, r9 ; input y
-	call number_to_ascii_decimals
-
-	mov byte [rsi], 'H'
-	inc rsi
-	
-	mov rdx, rsi
-	mov rsi, r10
-	sub rdx, rsi
-	;print_string: rsi=loc, rdx=bytes
-	call print_string
-
-	ret
-
-number_to_ascii_decimals:
-	; input  = rax; number to convert
-	; output = cursor_pos_string; 16bytes in .bss
-	xor rcx, rcx ; digit counter
-.divide_loop:
-	xor rdx,rdx ; must clear rdx first, is upper half of dividend
-				; div dives by rdx:rax combined as 128-bit number
-	mov rbx, 10 ; what we divide by
-	div rbx		; divs rax. outputs: rax = quotient, rdx = remainder
-	add dl, '0' ; remainder to ascii, just the low byte for char
-	push rdx	; push to stack
-	inc rcx		; count it
-	cmp rax, 0	; quotient left? then:
-	jne .divide_loop
-.write_loop:
-	pop rdx		; get digit from stack
-	mov [rsi], dl ;write ascii byte to buffer
-	inc rsi
-	dec rcx
-	jne .write_loop
-	ret
-
-_start:
-    jmp start_screen
-
-; --------------------
-; mutable state data
-; --------------------
-section .data
