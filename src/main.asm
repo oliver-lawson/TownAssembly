@@ -3,6 +3,7 @@ global main
 default rel
 
 %include "sdl.inc.asm"
+%include "random.inc.asm"
 
 %define WINDOW_WIDTH  640
 %define WINDOW_HEIGHT 480
@@ -212,6 +213,12 @@ draw_tiles:
     ;imul eax, 16
     ;shl eax, 8
     shl eax, 12
+    or ebx, eax
+
+    ; blue: add some random noise per frame
+    call rand_u64
+    mov eax, [rng_state]
+    shl eax, 16
     or ebx, eax
 
     ;     for py in 0..TILE_SIZE:
