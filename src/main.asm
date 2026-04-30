@@ -3,16 +3,14 @@ default rel
 
 %include "sdl.inc.asm"
 %include "random.inc.asm"
+%include "framebuffer.inc.asm"
 %include "texture.inc.asm"
 
-%define WINDOW_WIDTH  640
-%define WINDOW_HEIGHT 480
+
 %define TILE_SIZE	  16
-%define TILES_X		  (WINDOW_WIDTH  / TILE_SIZE)
-%define TILES_Y		  (WINDOW_HEIGHT / TILE_SIZE)
-%define FB_BYTES	  (WINDOW_WIDTH * WINDOW_HEIGHT * 4)
-; 4 bytes per pixel: A,R,G<B in SDL_PIXELFORMAT_ARGB8888
-%define FB_PITCH	  (WINDOW_WIDTH * 4) ; bytes per row
+%define TILES_X		  (WINDOW_W  / TILE_SIZE)
+%define TILES_Y		  (WINDOW_H / TILE_SIZE)
+
 
 section .data
 	window_title        db "Town Assembly", 0
@@ -31,7 +29,6 @@ section .bss ; uninitialised buffers
 	sdl_window		resq 1
 	sdl_renderer 	resq 1
 	sdl_event		resb SDL_EVENT_SIZE
-	framebuffer		resb FB_BYTES
 	sdl_texture		resq 1
 
 section .text ; begin!
@@ -55,8 +52,8 @@ main: ; stack alignment:
 	lea rdi, [window_title]
 	mov esi, SDL_WINDOWPOS_CENTERED
 	mov edx, SDL_WINDOWPOS_CENTERED
-	mov ecx, WINDOW_WIDTH
-	mov r8d, WINDOW_HEIGHT
+	mov ecx, WINDOW_W
+	mov r8d, WINDOW_H
 	mov r9d, SDL_WINDOW_SHOWN
 	call SDL_CreateWindow
 	test rax, rax
@@ -77,8 +74,8 @@ main: ; stack alignment:
 	; uploading new pixels to this texture often, not STATIC
 	; or TARGET.  seems best approach
 	mov edx, SDL_TEXTUREACCESS_STREAMING
-    mov ecx, WINDOW_WIDTH
-    mov r8d, WINDOW_HEIGHT
+    mov ecx, WINDOW_W
+    mov r8d, WINDOW_H
     call SDL_CreateTexture
     test rax, rax
     jz .fail_texture
@@ -295,8 +292,8 @@ draw_tiles:
 	mov rdx, r13
 	imul rdx, TILE_SIZE
 	add rdx, r15
-	; offset = (screen_y * WINDOW_WIDTH + screen_x) * 4
-	imul rdx, WINDOW_WIDTH
+	; offset = (screen_y * WINDOW_W + screen_x) * 4
+	imul rdx, WINDOW_W
 	add rdx, rcx
 	shl rdx, 2
 	mov dword [framebuffer + rdx], eax
