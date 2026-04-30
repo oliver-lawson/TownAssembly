@@ -1,13 +1,13 @@
-
 global main
 default rel
 
 %include "sdl.inc.asm"
 %include "random.inc.asm"
+%include "texture.inc.asm"
 
 %define WINDOW_WIDTH  640
 %define WINDOW_HEIGHT 480
-%define TILE_SIZE	  32
+%define TILE_SIZE	  16
 %define TILES_X		  (WINDOW_WIDTH  / TILE_SIZE)
 %define TILES_Y		  (WINDOW_HEIGHT / TILE_SIZE)
 %define FB_BYTES	  (WINDOW_WIDTH * WINDOW_HEIGHT * 4)
@@ -16,6 +16,7 @@ default rel
 
 section .data
 	window_title        db "Town Assembly", 0
+	texture_file		db "test.ppm", 0
 
 	; == SDL error messages ==
 	; 10 = \n, 0 = C-style string terminator:
@@ -23,6 +24,7 @@ section .data
 	err_window_msg      db "SDL_CreateWindow failed", 10, 0
 	err_renderer_msg    db "SDL_CreateRenderer failed", 10, 0
 	err_texture_msg     db "SDL_CreateTexture failed", 10, 0
+	err_ppm_msg     	db "load_ppm failed", 10, 0
 
 section .bss ; uninitialised buffers
 	alignb 8
@@ -37,7 +39,12 @@ section .text ; begin!
 main: ; stack alignment:
 	push rbp	 ; align stack to 16, "frame pointer" convention
 	mov rbp, rsp ; tell debugger where the frame is
-	; now do stuff
+
+	; load text texture before any window loading
+	lea rdi, [texture_file]
+	call load_ppm
+	test eax, eax
+	jnz .fail_ppm
 
 	; setup SDL
 	mov edi, SDL_INIT_VIDEO
@@ -139,6 +146,12 @@ main: ; stack alignment:
 	leave 	; mov rsp,rbp and pop rbp to restore stack
 	ret		; returns to crt1.o which calls exit()
 
+.fail_ppm:
+	lea rdi, [err_ppm_msg]
+	call print_error
+	mov eax, 1
+	leave
+	ret
 .fail_init:
 	lea rdi, [err_init_msg]
 	call print_error
@@ -175,9 +188,13 @@ main: ; stack alignment:
 	ret
 
 draw_tiles:
-	; draw some coloured gradient tiles to test the framebuffer
+	; draw some coloured ppm tiles to test .ppm read, random, framebuffer
+
     ; push callee saveds used:
-    push rbx ;colour
+    push rbx ;tint colour
+    mov rbp, rsp
+    sub rsp, 16
+    push rbx ;scratch
     push r12 ;tx
     push r13 ;ty
     push r14 ;px
@@ -194,34 +211,12 @@ draw_tiles:
 .tx_loop:
 	cmp r12, TILES_X
 	jge .tx_done
-
-    ; ==============================================
-    ; compute colour for this tile, store in ebx
-    ; 0xFF000000 | (tx*12)<<16 | (ty*16)<<8 | 	0
-    ;    	A			R			G			B
-    ; ==============================================
-    ;
-    ; alpha
-    mov ebx, 0xFF000000
-    ; red: (tx * 12) << 16
-    imul eax, r12d, 12
-    shl eax, 16
-    or ebx, eax
-
-    ; green: (ty * 16) << 8  ==  ty << 12
-    mov eax, r13d
-    ;imul eax, 16
-    ;shl eax, 8
-    shl eax, 12
-    or ebx, eax
-
-    ; blue: add some random noise per frame
-    call rand_u64
-    mov eax, [rng_state]
-    shl eax, 16
-    or ebx, eax
-
-    ;     for py in 0..TILE_SIZE:
+	; call random tint for this tile, using top bytes of rng_state
+	; as rgb tint factors in range 0..255 then scaled by
+	; tint_channel/256 via a mul+shift
+	call rand_u64
+	mov [rbp-4], eax
+	;     for py in 0..TILE_SIZE:
     xor r15, r15 ; py=0
 .py_loop:
 	cmp r15, TILE_SIZE
@@ -232,24 +227,71 @@ draw_tiles:
 	cmp r14, TILE_SIZE
 	jge .px_done
 
-	; == pixel write ==
-    ;         for px in 0..TILE_SIZE:
-    ;             screen_x = tx * TILE_SIZE + px
-    mov rax, r12 		; rax=tx
-    imul rax, TILE_SIZE ; rax*=TILE_SIZE
-    add rax, r14 		; rax+=px
-    ;             screen_y = ty * TILE_SIZE + py
-    mov rcx, r13 		; rcx=ty
-    imul rcx, TILE_SIZE ; rcx*=TILE_SIZE
-    add rcx, r15		; rcx+=py
-    ;             offset   = (screen_y * WINDOW_WIDTH + screen_x) * 4
-    mov rdx, rcx		; rdx=screen_y
-    imul rdx, WINDOW_WIDTH ; rdx*=WINDOW_WIDTH
-    add rdx, rax		; rdx+=screen_x
-    shl rdx, 2			; rdx*=4
-    ;             [framebuffer + offset] = colour     (32-bit write)
-    ; write 32-bit pixel to framebuffer
-    mov dword [framebuffer + rdx], ebx
+	; sample texture at this pixel's position within the til
+	; u = px * 0x10000 / TILE_SIZE, v = py * 0x10000 / TILE_SIZE
+	; since TILE_SIZE is 16, diving 0x10000 by 16 = 0x1000
+	; so, u = px * 0x1000, v = py * 0x1000
+	mov edi, r14d
+	shl edi, 12			; u = px * 0x1000
+	mov esi, r15d
+	shl esi, 12			; v = py * 0x1000
+	call sample_texture
+	; eax now = ARGB texel from the texture
+
+	; tint: multipying each channel by tint, then shifting
+	; down by 8. doing r,g,b separately
+	mov ebx, [rbp-4]	; ebx = tint colour
+
+	;r
+	mov ecx, eax
+	shr ecx, 16
+	and ecx, 0xFF		; ecx = tex red
+	mov edx, ebx
+	shr edx, 16
+	and edx, 0xFF		; edx = tint red
+	imul ecx, edx		; ecx = tex_r*tint_r
+	shr ecx, 8			; scale back to 0..255
+
+	;g
+	mov edx, eax
+	shr edx, 8
+	and edx, 0xFF
+	mov edi, ebx
+	shr edi, 8
+	and edi, 0xFF
+	imul edx, edi
+	shr edx, 8
+
+	;b
+	mov esi, eax
+	and esi, 0xFF
+	mov edi, ebx
+	and edi, 0xFF
+	imul esi, edi
+	shr esi, 8
+
+	; push back into ARGB
+	mov eax, 0xFF000000
+	shl ecx, 16
+	or eax, ecx ;r
+	shl edx, 8
+	or eax, edx ;g
+	or eax, esi ;b
+
+	; write pixel to framebuffer
+	;screen_x = tx * TILE_SIZE + px
+	mov rcx, r12
+	imul rcx, TILE_SIZE
+	add rcx, r14
+	; scren_y
+	mov rdx, r13
+	imul rdx, TILE_SIZE
+	add rdx, r15
+	; offset = (screen_y * WINDOW_WIDTH + screen_x) * 4
+	imul rdx, WINDOW_WIDTH
+	add rdx, rcx
+	shl rdx, 2
+	mov dword [framebuffer + rdx], eax
 
     inc r14 ; px++
     jmp .px_loop
@@ -281,7 +323,7 @@ draw_tiles:
 	pop r13 ;ty
 	pop r12 ;tx
 	pop rbx ;colour
-
+	leave ; undo the stack frame entered in top of draw_tiles
     ret
 
 print_error:
