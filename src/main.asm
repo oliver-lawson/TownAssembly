@@ -40,7 +40,7 @@ main: ; stack alignment:
 	push rbp	 ; align stack to 16, "frame pointer" convention
 	mov rbp, rsp ; tell debugger where the frame is
 
-	; load text texture before any window loading
+	; load test texture before any window loading
 	lea rdi, [texture_file]
 	call load_ppm
 	test eax, eax
@@ -136,6 +136,7 @@ main: ; stack alignment:
 
 .cleanup:
 	; === end main ===
+	call free_texture
 	mov rdi, [sdl_texture]
 	call SDL_DestroyTexture
 	mov rdi, [sdl_renderer]
@@ -155,6 +156,7 @@ main: ; stack alignment:
 .fail_init:
 	lea rdi, [err_init_msg]
 	call print_error
+	call free_texture
 	;call SDL_Quit ; was never created
 	mov eax, 1 ; exit code
 	leave
@@ -162,6 +164,7 @@ main: ; stack alignment:
 .fail_window:
 	lea rdi, [err_window_msg]
 	call print_error
+	call free_texture
 	call SDL_Quit
 	mov eax, 1
 	leave
@@ -169,6 +172,7 @@ main: ; stack alignment:
 .fail_renderer:
 	lea rdi, [err_renderer_msg]
 	call print_error
+	call free_texture
 	mov rdi, [sdl_window]
 	call SDL_DestroyWindow
 	call SDL_Quit
@@ -178,6 +182,7 @@ main: ; stack alignment:
 .fail_texture:
 	lea rdi, [err_texture_msg]
 	call print_error
+	call free_texture
 	mov rdi, [sdl_renderer]
 	call SDL_DestroyRenderer
 	mov rdi, [sdl_window]
@@ -191,7 +196,7 @@ draw_tiles:
 	; draw some coloured ppm tiles to test .ppm read, random, framebuffer
 
     ; push callee saveds used:
-    push rbx ;tint colour
+    push rbp
     mov rbp, rsp
     sub rsp, 16
     push rbx ;scratch
@@ -215,6 +220,9 @@ draw_tiles:
 	; as rgb tint factors in range 0..255 then scaled by
 	; tint_channel/256 via a mul+shift
 	call rand_u64
+	; brighten a bit to see our texture,
+	; ORing in 0x60 to each channel byte seems to work
+	or eax, 0x00606060
 	mov [rbp-4], eax
 	;     for py in 0..TILE_SIZE:
     xor r15, r15 ; py=0
