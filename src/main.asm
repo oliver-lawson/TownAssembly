@@ -16,7 +16,7 @@ default rel
 
 section .data
 	window_title        db "Town Assembly", 0
-	texture_file		db "test.ppm", 0
+	texture_file		db "res/test/test.ppm", 0
 
 	; == SDL error messages ==
 	; 10 = \n, 0 = C-style string terminator:
