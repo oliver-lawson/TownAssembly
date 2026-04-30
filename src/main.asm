@@ -81,6 +81,8 @@ main: ; stack alignment:
     jz .fail_texture
     mov [sdl_texture], rax
 
+	call rng_seed ; seems as good a time as any
+
 .main_loop:
 	; === event polling ===
 .poll_loop:
@@ -154,7 +156,6 @@ main: ; stack alignment:
 	lea rdi, [err_init_msg]
 	call print_error
 	call free_texture
-	;call SDL_Quit ; was never created
 	mov eax, 1 ; exit code
 	leave
 	ret
@@ -216,7 +217,7 @@ draw_tiles:
 	; call random tint for this tile, using top bytes of rng_state
 	; as rgb tint factors in range 0..255 then scaled by
 	; tint_channel/256 via a mul+shift
-	call rand_u64
+	;call rng_next
 	; brighten a bit to see our texture,
 	; ORing in 0x60 to each channel byte seems to work
 	or eax, 0x00606060
