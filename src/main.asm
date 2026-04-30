@@ -217,7 +217,7 @@ draw_tiles:
 	; call random tint for this tile, using top bytes of rng_state
 	; as rgb tint factors in range 0..255 then scaled by
 	; tint_channel/256 via a mul+shift
-	;call rng_next
+	call rng_next
 	; brighten a bit to see our texture,
 	; ORing in 0x60 to each channel byte seems to work
 	or eax, 0x00606060
