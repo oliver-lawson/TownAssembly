@@ -2,7 +2,7 @@
 ; 
 ; the main workhorse for tile drawing
 ; 
-; copy an axis-aligned rct from loaded texture into the fb
+; copy an axis-aligned rect from loaded texture into the fb
 ; no rotation/filtering/UV interp, just fast rect-to-rect copy
 ;
 ; should be much faster for our tilemaps than going thrrough
@@ -26,7 +26,7 @@ section .text
 ;	// clip dst to screen, adjusting src to match
 ;	if (dst_x < 0) { src_x -= dst_x; src_w += dst_x; dst_x = 0; }
 ;	if (dst_y < 0) { src_y -= dst_y; src_h += dst_y; dst_y = 0; }
-;	if (dst_x + src_w > WINDOW_W)  src_w = WINDOW_W  - dst_x;
+;	if (dst_x + src_w > WINDOW_W) src_w = WINDOW_W  - dst_x;
 ;	if (dst_y + src_h > WINDOW_H) src_h = WINDOW_H - dst_y;
 ;	if (src_w <= 0 || src_h <= 0) return;
 ;
