@@ -13,8 +13,8 @@
 %define TILEMAP_INC
 
 %define TILE_SIZE 16
-%define MAP_WIDTH 40 ; fixed to 40*16=640=WINDOW_W for now
-%define MAP_HEIGHT 30 ; until we add camera
+%define MAP_WIDTH 25 ; fixed to 40*16=640=WINDOW_W for now
+%define MAP_HEIGHT 18 ; until we add camera
 
 ; tile IDs, matching the tiles.ppm atlsa
 %define TILE_GRASS	0

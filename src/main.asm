@@ -12,6 +12,8 @@ default rel
 section .data
 	window_title		db "Town Assembly", 0
 	tile_ppm_file		db "res/tiles.ppm", 0
+	scale_quality_hint  db "SDL_RENDER_SCALE_QUALITY", 0
+	scale_quality_value db "0", 0 ; "0" = nearest-neighbour
 
 	%define TILES_X		  (WINDOW_W  / TILE_SIZE)
 	%define TILES_Y		  (WINDOW_H / TILE_SIZE)
@@ -36,6 +38,7 @@ section .bss ; uninitialised buffers
 	sdl_window			resq 1
 	sdl_renderer 		resq 1
 	sdl_texture			resq 1
+	current_scale       resq 1
 
 	; input state
 	key_quit			resb 1
@@ -56,9 +59,7 @@ main: ; stack alignment:
 	push rbp	 ; align stack to 16, "frame pointer" convention
 	mov rbp, rsp ; tell debugger where the frame is
 
-	call rng_seed_from_time
-
-	; load tile atlas, tiles.ppm
+	; load tile atlas - tiles.ppm
 	; must be 16^2px tiles, and match tile types in tilemap.inc.asm
 	lea rdi, [tile_ppm_file]
 	call load_ppm
@@ -71,17 +72,26 @@ main: ; stack alignment:
 	lea rdi, [log_msg_started]
 	call debug_log
 
+	; set video scale
+	mov dword [current_scale], 2
+
+	; SDL hints - must be done before SDL_INIT_VIDEO
+	lea rdi, [scale_quality_hint]
+	lea rsi, [scale_quality_value]
+	call SDL_SetHint
+
 	; setup SDL
 	mov edi, SDL_INIT_VIDEO
 	call SDL_Init
 	test eax, eax
 	jnz .fail_init
 
+	; window titl, pos, scale
 	lea rdi, [window_title]
 	mov esi, SDL_WINDOWPOS_CENTERED
 	mov edx, SDL_WINDOWPOS_CENTERED
-	mov ecx, WINDOW_W
-	mov r8d, WINDOW_H
+	mov ecx, WINDOW_W * 2 ; default scale
+	mov r8d, WINDOW_H * 2
 	mov r9d, SDL_WINDOW_SHOWN
 	call SDL_CreateWindow
 	test rax, rax
@@ -94,6 +104,14 @@ main: ; stack alignment:
 	test rax, rax
 	jz .fail_renderer
 	mov [sdl_renderer], rax ; store pointer to renderer
+
+	; + tell SDL the renderer's logical size if WINDOW_W * WINDOW_H
+	; this means RenderCopy with NULL dst rect will scale our texture
+	; to fill the window, regardless of window size
+	mov rdi, [sdl_renderer]
+	mov esi, WINDOW_W
+	mov edx, WINDOW_H
+	call SDL_RenderSetLogicalSize
 
 	; create gpu streaming texture we'll upload to each frame
 	mov rdi, [sdl_renderer]
@@ -169,14 +187,14 @@ main: ; stack alignment:
 	;top row: fps counter
 	mov edi, 4 ; x
 	mov esi, 4 ; y
-	mov edx, 0xFF33FF33 ; some green, would be cool to speed-tint
+	mov edx, 0xFF004400 ; some green, would be cool to speed-tint
 	lea rcx, [hud_label_fps]
 	mov r8d, [current_fps]
 	call debug_print_label_int
 	; second line: help text
 	mov edi, 4
 	mov esi, 14
-	mov edx, 0xFFFFFFFF;
+	mov edx, 0xFF000000;
 	lea rcx, [hud_help]
 	call debug_print
 

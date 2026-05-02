@@ -6,6 +6,7 @@
 
 extern SDL_Init
 extern SDL_Quit
+extern SDL_SetHint
 extern SDL_CreateWindow
 extern SDL_DestroyWindow
 extern SDL_CreateRenderer
@@ -20,6 +21,8 @@ extern SDL_PollEvent
 extern SDL_Delay
 extern SDL_GetError
 extern SDL_GetTicks
+extern SDL_SetWindowSize
+extern SDL_RenderSetLogicalSize
 
 
 ; sdl constants we need (from sdl headers, computed at runtime there)

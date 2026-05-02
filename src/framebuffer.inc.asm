@@ -10,8 +10,8 @@
 %ifndef FRAMEBUFFER_INC
 %define FRAMEBUFFER_INC
 
-%define WINDOW_W 640
-%define WINDOW_H 480
+%define WINDOW_W 400 ; should keep in multiples of 16, our tilesize
+%define WINDOW_H 288
 
 %define FB_BYTES	  (WINDOW_W * WINDOW_H * 4)
 ; 4 bytes per pixel: A,R,G<B in SDL_PIXELFORMAT_ARGB8888
