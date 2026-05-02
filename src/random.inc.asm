@@ -47,16 +47,16 @@ rng_seed_from_time:
 ; state ^= state >> 7;
 ; state ^= state << 17;
 rng_next:
-    mov rax, [rng_state]
-    mov rcx, rax	; state2 = state
-    shl rcx, 13		; state2 << 13
-    xor rax, rcx	; state ^= state2
-    mov rcx, rax	; state2 = state
-    shr rcx, 7		; state2 >> 7
-    xor rax, rcx	; state ^= state2
-    mov rcx, rax	; state2 = state
-    shl rcx, 17		; state2 << 17
-    xor rax, rcx	; state ^= state2
-    mov [rng_state], rax
-    ret
+	mov rax, [rng_state]
+	mov rcx, rax	; state2 = state
+	shl rcx, 13		; state2 << 13
+	xor rax, rcx	; state ^= state2
+	mov rcx, rax	; state2 = state
+	shr rcx, 7		; state2 >> 7
+	xor rax, rcx	; state ^= state2
+	mov rcx, rax	; state2 = state
+	shl rcx, 17		; state2 << 17
+	xor rax, rcx	; state ^= state2
+	mov [rng_state], rax
+	ret
 %endif

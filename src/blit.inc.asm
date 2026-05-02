@@ -64,9 +64,9 @@ blit_texture_rect:
 
 	; stash all six args into stack locals so we can modify them
 	; during clipping without losing the originals
-	;   [rbp-4]  src_x     [rbp-8]  src_y
-	;   [rbp-12] src_w     [rbp-16] src_h
-	;   [rbp-20] dst_x     [rbp-24] dst_y
+	;	[rbp-4]  src_x	[rbp-8]  src_y
+	;	[rbp-12] src_w	[rbp-16] src_h
+	;	[rbp-20] dst_x	[rbp-24] dst_y
 	mov [rbp-4],  edi
 	mov [rbp-8],  esi
 	mov [rbp-12], edx

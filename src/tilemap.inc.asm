@@ -40,7 +40,6 @@ section .text
 ; for testing atlas+blitter+tilemap all working together
 ;================================================================
 init_tilemap_test:
-	call rng_seed_from_time
 	push rbx
 	push r12		; y
 	push r13		; x
@@ -80,21 +79,21 @@ init_tilemap_test:
 	jmp .write
 
 .check_dirt:
-    mov r14, rax		; save tile
-    call rng_next
-    and eax, 7
-    jnz .keep_grass
-    mov rax, r14
-    mov eax, TILE_DIRT
-    jmp .write
-    
+	mov r14, rax		; save tile
+	call rng_next
+	and eax, 7
+	jnz .keep_grass
+	mov rax, r14
+	mov eax, TILE_DIRT
+	jmp .write
+	
 .keep_grass:
-    mov rax, r14
-    jmp .write
+	mov rax, r14
+	jmp .write
 
 .pick_dirt:
 	mov eax, TILE_DIRT
-    jmp .write
+	jmp .write
 
 .pick_stone:
 	mov eax, TILE_STONE

@@ -7,36 +7,59 @@ default rel
 %include "texture.inc.asm"
 %include "blit.inc.asm"
 %include "tilemap.inc.asm"
+%include "debug.inc.asm"
 
 section .data
-	window_title        db "Town Assembly", 0
+	window_title		db "Town Assembly", 0
 	tile_ppm_file		db "res/tiles.ppm", 0
 
 	%define TILES_X		  (WINDOW_W  / TILE_SIZE)
 	%define TILES_Y		  (WINDOW_H / TILE_SIZE)
 	; == SDL error messages ==
 	; 10 = \n, 0 = C-style string terminator:
-	err_init_msg        db "SDL_Init failed", 10, 0 
-	err_window_msg      db "SDL_CreateWindow failed", 10, 0
-	err_renderer_msg    db "SDL_CreateRenderer failed", 10, 0
-	err_texture_msg     db "SDL_CreateTexture failed", 10, 0
-	err_ppm_msg     	db "load_ppm failed", 10, 0
+	err_init_msg		db "SDL_Init failed", 10, 0 
+	err_window_msg		db "SDL_CreateWindow failed", 10, 0
+	err_renderer_msg	db "SDL_CreateRenderer failed", 10, 0
+	err_texture_msg		db "SDL_CreateTexture failed", 10, 0
+	err_ppm_msg			db "load_ppm failed", 10, 0
+
+	; HUD text
+	hud_label_fps		db "fps", 0
+	hud_help			db "F3 hud  ESC quit"
+
+	; log messages
+	log_msg_started		db "tilemap loaded"
+	log_msg_hud_toggles	db "hud toggled"
 
 section .bss ; uninitialised buffers
 	alignb 8
-	sdl_window		resq 1
-	sdl_renderer 	resq 1
-	sdl_event		resb SDL_EVENT_SIZE
-	sdl_texture		resq 1
+	sdl_window			resq 1
+	sdl_renderer 		resq 1
+	sdl_texture			resq 1
 
+	; input state
+	key_quit			resb 1
+	key_toggle_pressed	resb 1	; one-shot/cleared after read
+
+	; fps tracking
+	alignb 4
+	frame_count			resd 1
+	last_fps_ticks		resd 1	; SDL_GetTicks value @ last fps sample
+	last_fps_frame		resd 1	; frame_count @ last fps sample
+	current_fps			resd 1	; final computed fps for display
+
+	alignb 8
+	event_buf			resb SDL_EVENT_SIZE
 section .text ; begin!
 
 main: ; stack alignment:
 	push rbp	 ; align stack to 16, "frame pointer" convention
 	mov rbp, rsp ; tell debugger where the frame is
 
+	call rng_seed_from_time
+
 	; load tile atlas, tiles.ppm
-	; must be 16^2px tiles, and mathc tile types in tilemap.inc.asm
+	; must be 16^2px tiles, and match tile types in tilemap.inc.asm
 	lea rdi, [tile_ppm_file]
 	call load_ppm
 	test eax, eax
@@ -44,6 +67,9 @@ main: ; stack alignment:
 
 	; TMP
 	call init_tilemap_test
+
+	lea rdi, [log_msg_started]
+	call debug_log
 
 	; setup SDL
 	mov edi, SDL_INIT_VIDEO
@@ -76,37 +102,90 @@ main: ; stack alignment:
 	; uploading new pixels to this texture often, not STATIC
 	; or TARGET.  seems best approach
 	mov edx, SDL_TEXTUREACCESS_STREAMING
-    mov ecx, WINDOW_W
-    mov r8d, WINDOW_H
-    call SDL_CreateTexture
-    test rax, rax
-    jz .fail_texture
-    mov [sdl_texture], rax
+	mov ecx, WINDOW_W
+	mov r8d, WINDOW_H
+	call SDL_CreateTexture
+	test rax, rax
+	jz .fail_texture
+	mov [sdl_texture], rax
 
-	call rng_seed ; seems as good a time as any
+	; grab the starting tick count for FPS calc
+	call SDL_GetTicks
+	mov [last_fps_ticks], eax
 
 	; --- main loop ---
 .main_loop:
-.poll_loop:
-	lea rdi, [sdl_event]
-	call SDL_PollEvent
-	test eax, eax
-	jz .poll_done	; queue empty
+	call process_sdl_events
 
-	mov eax, [sdl_event + SDL_EVENT_TYPE_OFF]
-	cmp eax, SDL_QUIT_EVENT
-	je .cleanup
-	cmp eax, SDL_KEYDOWN_EVENT
-	jne .poll_loop	; not keydown, get next
+	cmp byte [key_quit], 0
+	jne .cleanup
 
-	mov eax, [sdl_event + SDL_EVENT_SCANCODE_OFF]
-	cmp eax, SCANCODE_ESCAPE
-	je .cleanup
-	jmp .poll_loop
+	; handle one shot keys
+	cmp byte [key_toggle_pressed], 0
+	je .no_toggle
+	mov byte [key_toggle_pressed], 0
+	call debug_toggle
+	lea rdi, [log_msg_hud_toggles]
+	call debug_log
+.no_toggle:
+	; --- fps calculation ---
+	; sampling every 500ms and scaling up
+	;
+	; C equiv:
+	;	uint32_t now = SDL_GetTicks();
+	;	uint32_t elapsed = now - last_fps_ticks;
+	;	if (elapsed >= 500) {
+	;		uint32_t frames = frame_count - last_fps_frame;
+	;		current_fps = frames * 1000 / elapsed;
+	;		last_fps_ticks = now;
+	;		last_fps_frame = frame_count;
+	;	}
+	call SDL_GetTicks
+	mov ecx, eax				; ecx = now
+	mov r11d, ecx
+	sub r11d, [last_fps_ticks]	; r11d = elapsed ms
+	cmp r11d, 500
+	jl .fps_done
+	; enough time has passed - compute fps
+	mov eax, [frame_count]
+	sub eax, [last_fps_frame]	; eax = frames since last sample
+	imul eax, 1000				; scale to per-second
+	xor edx, edx
+	div r11d					; eax = fps
+	mov [current_fps], eax
+	mov [last_fps_ticks], ecx	; reset sample window
+	mov eax, [frame_count]
+	mov [last_fps_frame], eax
+.fps_done:
 
-.poll_done:
 	; --- render ---
 	call draw_tilemap 
+
+	; ------ draw debug hud (if enabled) ------
+	call is_debug_hud_enabled
+	test eax, eax
+	jz .skip_hud_draw
+
+	;top row: fps counter
+	mov edi, 4 ; x
+	mov esi, 4 ; y
+	mov edx, 0xFF33FF33 ; some green, would be cool to speed-tint
+	lea rcx, [hud_label_fps]
+	mov r8d, [current_fps]
+	call debug_print_label_int
+	; second line: help text
+	mov edi, 4
+	mov esi, 14
+	mov edx, 0xFFFFFFFF;
+	lea rcx, [hud_help]
+	call debug_print
+
+	; log lines at the bottom
+	call debug_render_log
+	; -------- end hud (if enabled) -------
+	.skip_hud_draw:
+
+	inc dword [frame_count]
 
 	; upload framebuffer to gpu texture
 	mov rdi, [sdl_texture]
@@ -120,16 +199,16 @@ main: ; stack alignment:
 
 	; SDL_RenderCopy(renderer, texture, NULL, NULL):
 	mov rdi, [sdl_renderer]
-    mov rsi, [sdl_texture]
-    xor rdx, rdx
-    xor rcx, rcx
-    call SDL_RenderCopy
+	mov rsi, [sdl_texture]
+	xor rdx, rdx
+	xor rcx, rcx
+	call SDL_RenderCopy
 
 	mov rdi, [sdl_renderer]
 	call SDL_RenderPresent
 
-	mov edi, 16 ; delay ms, even if we have vsync enabled
-	call SDL_Delay
+	;mov edi, 16 ; delay ms, even if we have vsync enabled
+	;call SDL_Delay
 
 	jmp .main_loop
 
@@ -143,6 +222,7 @@ main: ; stack alignment:
 	mov rdi, [sdl_window]
 	call SDL_DestroyWindow
 	call SDL_Quit
+	xor eax, eax ; 0
 	leave 	; mov rsp,rbp and pop rbp to restore stack
 	ret		; returns to crt1.o which calls exit()
 
@@ -188,6 +268,52 @@ main: ; stack alignment:
 	call SDL_Quit
 	mov eax, 1
 	leave
+	ret
+
+; -- process_sdl_events --
+; drain SDL event quere & update key state
+;
+; one-shot (latched) key state:
+;	key_toggle_pressed set to 1 on keydown, acted on by main loop
+;   and then cleared.  so it's a "do once" latch
+; sustained: eg key_quit, stays set once triggered  
+process_sdl_events:
+	push rbp
+	mov rbp, rsp
+.poll:
+	lea rdi, [event_buf]
+	call SDL_PollEvent
+	test eax, eax
+	jz .done				; queue empty
+
+	mov eax, [event_buf + SDL_EVENT_TYPE_OFF]
+	cmp eax, SDL_QUIT_EVENT
+	je .got_quit
+	cmp eax, SDL_KEYDOWN_EVENT
+	je .got_keydown
+	jmp .poll				; ignore other events
+
+.got_quit:
+	mov byte [key_quit], 1
+	jmp .poll
+
+.got_keydown:
+	mov eax, [event_buf + SDL_EVENT_SCANCODE_OFF]
+	cmp eax, SCANCODE_ESCAPE
+	je .key_escape
+	cmp eax, SCANCODE_F3
+	je .key_f3
+	jmp .poll
+
+.key_escape:
+	mov byte [key_quit], 1
+	jmp .poll
+.key_f3:
+	mov byte [key_toggle_pressed], 1
+	jmp .poll
+
+.done:
+	pop rbp
 	ret
 
 ;================================================================
