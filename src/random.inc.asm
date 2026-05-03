@@ -19,7 +19,7 @@ section .text
 ;================================================================
 rng_seed:
 	mov [rng_state], rdi
-	test rdi, rdi ; simple 0 check, force 1. not pretty
+	test rdi, rdi ; simple 0 check; set to 1
 	jnz .ok
 	mov qword [rng_state], 1
 .ok:
@@ -37,15 +37,18 @@ rng_seed_from_time:
 	mov rdi, rax
 	jmp rng_seed 	; put into rng_seed(rdi)
 
-
+;================================================================
 ; rng_next - advance the rng state and return some
 ; 			 random u64 in rax.  basic xorshift
 ; clobbers : rac, rcx
 ; preserves: evrything else
+; out : rax & [rng_state]
+;
 ; C equivalent:
 ; state ^= state << 13;
 ; state ^= state >> 7;
 ; state ^= state << 17;
+;================================================================
 rng_next:
 	mov rax, [rng_state]
 	mov rcx, rax	; state2 = state
@@ -59,4 +62,31 @@ rng_next:
 	xor rax, rcx	; state ^= state2
 	mov [rng_state], rax
 	ret
+
+;================================================================
+; rng_range: return a value in [0, upper_bound)
+;----------------------------------------------------------------
+; C equiv:
+;	rng_next() % upper_bound;
+;================================================================
+; in: edi = upper bound (exclusive), must be > 0
+;out: eax = value in [0, edi)
+;================================================================
+rng_range:
+	call rng_next
+	xor edx, edx
+	div edi
+	mov eax, edx
+	ret
+
+rng_percent:
+	push rdi
+	mov edi, 100
+	call rng_range
+	pop rdi
+	cmp eax, edi
+	setl al
+	movzx eax, al
+	ret
+
 %endif
