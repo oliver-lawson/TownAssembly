@@ -30,8 +30,8 @@ extern open
 extern close
 extern fstat
 
-%define O_RDONLY    0
-%define PROT_READ   1
+%define O_RDONLY	0
+%define PROT_READ	1
 %define MAP_PRIVATE 2
 
 ; stat's response struct is platform-specific:

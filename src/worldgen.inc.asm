@@ -4,7 +4,7 @@
 %define WORLDGEN_INC
 
 %define CA_WALL_PERCENT 40		; initial wall density
-%define CA_BASE_ITERATIONS	0		; smoothing passes
+%define CA_BASE_ITERATIONS	3		; smoothing passes
 
 ; intermediate cell types used during CA
 %define CA_FLOOR 0

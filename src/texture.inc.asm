@@ -21,26 +21,25 @@ extern free
 %define TEX_STRUCT_SIZE 24
 
 section .bss
-	alignb 8
-	; the tile atlas. multiple textures (eg sprites) can be added
-	; alongside as additional 24-byte reservations.
+	alignb 8  ; tilesheets!
 	atlas_tex		resb TEX_STRUCT_SIZE
+	sprites_tex		resb TEX_STRUCT_SIZE
 
 section .text
 ;================================================================
 ; sample_texture: nearest-neighbour pixel sample
-; in:	rdi = ptr to texture struct
-;		esi = u (16.16 fixed point, where 0x10000=1.0=full width)
-; 		edx = v " "
-; out:	eax = ARGB colour
-;
+;----------------------------------------------------------------
 ; 		using 16.16 fixed point as using ints only for now
 ;		coords wraped with % into [0,dim) so no OOR hopefully
-;
 ; UNUSED
 ; was used before for manual drawing but currently all drawing is
 ; tile-based and so using the faster blit_texture_rect
 ; kept for future direct drawing, maybe some cool effects
+;----------------------------------------------------------------
+; in:	rdi = ptr to texture struct
+;		esi = u (16.16 fixed point, where 0x10000=1.0=full width)
+; 		edx = v " "
+; out:	eax = ARGB colour
 ;================================================================
 sample_texture:
 	; load width/height/pixels from struct once
@@ -56,7 +55,7 @@ sample_texture:
 	; ----------- compute texel_x -----------
 	mov eax, esi		; eax = u (16.16fixed point)
 	imul eax, r8d		; eax = u * width
-	sar eax, 16		; scale down from 16.16, sar drops fractional part
+	sar eax, 16	; scale down from 16.16, sar drops fractional part
 
 	; eax can be negative or >= width, so wrapping into [0, width)
 	; idiv puts signed rmainder to edx, but cdq is needed first
@@ -101,8 +100,8 @@ free_texture:
 	push rbp
 	mov rbp, rsp
 	push rbx
-	sub rsp, 8                   ; align
-	mov rbx, rdi                 ; save struct ptr
+	sub rsp, 8				; align
+	mov rbx, rdi			; save struct ptr
 	mov rdi, [rbx + TEX_PIXELS_OFF]
 	test rdi, rdi
 	jz .ft_done

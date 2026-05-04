@@ -181,4 +181,184 @@ blit_texture_rect:
 	leave
 	ret
 
+
+;================================================================
+; blit_texture_rect_keyed
+;----------------------------------------------------------------
+; like blit_texture_rect, but skips pixels that match a colour key
+; magenta = transparent
+; the inner loop is per-pixel rather than rep movsd, so will be
+; slower but only used for sprites
+;----------------------------------------------------------------
+; in: sam args as blit_texture_rect plus:
+;	  [rbp+32] = colour key (ARGB)
+;================================================================
+blit_texture_rect_keyed:
+	push rbp
+	mov rbp, rsp
+	sub rsp, 80
+	push rbx
+	push r12
+	push r13
+	push r14
+	push r15
+
+; locals (rbp-relative):
+;	[rbp-4]  src_x
+;	[rbp-8]  src_y
+;	[rbp-12] src_w
+;	[rbp-16] src_h
+;	[rbp-20] dst_x
+;	[rbp-24] dst_y
+;	[rbp-32] tex ptr
+;	[rbp-36] flip_x
+;	[rbp-40] colour key
+;
+; stack args from caller (above rbp):
+;	[rbp+16] = dst_y
+;	[rbp+24] = flip_x
+;	[rbp+32] = colour key
+
+	mov [rbp-32], rdi
+	mov [rbp-4],  esi
+	mov [rbp-8],  edx
+	mov [rbp-12], ecx
+	mov [rbp-16], r8d
+	mov [rbp-20], r9d
+	mov eax, [rbp+16]
+	mov [rbp-24], eax
+	mov eax, [rbp+24]
+	mov [rbp-36], eax
+	mov eax, [rbp+32]
+	mov [rbp-40], eax
+
+	; --- clip dst to framebuffer (same as solid blit) ---
+	mov eax, [rbp-20]
+	test eax, eax
+	jns .k_no_clip_left
+	cmp dword [rbp-36], 0
+	jne .k_clip_left_flipped
+	sub [rbp-4], eax
+	add [rbp-12], eax
+	mov dword [rbp-20], 0
+	jmp .k_no_clip_left
+.k_clip_left_flipped:
+	add [rbp-12], eax
+	mov dword [rbp-20], 0
+.k_no_clip_left:
+
+	mov eax, [rbp-24]
+	test eax, eax
+	jns .k_no_clip_top
+	sub [rbp-8], eax
+	add [rbp-16], eax
+	mov dword [rbp-24], 0
+.k_no_clip_top:
+
+	mov eax, [rbp-20]
+	add eax, [rbp-12]
+	cmp eax, WINDOW_W
+	jle .k_no_clip_right
+	mov eax, WINDOW_W
+	sub eax, [rbp-20]
+	mov [rbp-12], eax
+.k_no_clip_right:
+
+	mov eax, [rbp-24]
+	add eax, [rbp-16]
+	cmp eax, WINDOW_H
+	jle .k_no_clip_bottom
+	mov eax, WINDOW_H
+	sub eax, [rbp-24]
+	mov [rbp-16], eax
+.k_no_clip_bottom:
+
+	cmp dword [rbp-12], 0
+	jle .k_done
+	cmp dword [rbp-16], 0
+	jle .k_done
+
+	; src/dst pointer setup - same as solid blit
+	mov rax, [rbp-32]
+	mov r15, [rax + TEX_PIXELS_OFF]
+	mov r12d, [rax + TEX_WIDTH_OFF]
+
+	mov eax, [rbp-8]
+	imul eax, r12d
+	cmp dword [rbp-36], 0
+	jne .k_src_flipped_init
+	add eax, [rbp-4]
+	jmp .k_src_init_done
+.k_src_flipped_init:
+	add eax, [rbp-4]
+	add eax, [rbp-12]
+	dec eax
+.k_src_init_done:
+	shl rax, 2
+	add rax, r15
+	mov rsi, rax
+
+	mov eax, [rbp-24]
+	imul eax, WINDOW_W
+	add eax, [rbp-20]
+	shl rax, 2
+	lea rdi, [framebuffer]
+	add rdi, rax
+
+	mov r13d, r12d
+	shl r13d, 2
+
+	mov r14d, [rbp-16]		; rows remaining
+	mov ebx, [rbp-40]		; colour key in ebx for fast compare
+
+.k_row_loop:
+	mov r10, rsi
+	mov r11, rdi
+	mov ecx, [rbp-12]		; pixel count
+
+	cmp dword [rbp-36], 0
+	jne .k_flip_copy
+
+.k_normal_pixel:
+	mov eax, [rsi]
+	cmp eax, ebx
+	je .k_skip_pixel_n
+	mov [rdi], eax
+.k_skip_pixel_n:
+	add rsi, 4
+	add rdi, 4
+	dec ecx
+	jnz .k_normal_pixel
+	jmp .k_row_done
+
+.k_flip_copy:
+.k_flip_pixel:
+	mov eax, [rsi]
+	cmp eax, ebx
+	je .k_skip_pixel_f
+	mov [rdi], eax
+.k_skip_pixel_f:
+	sub rsi, 4
+	add rdi, 4
+	dec ecx
+	jnz .k_flip_pixel
+
+.k_row_done:
+	mov rsi, r10
+	add rsi, r13
+	mov rdi, r11
+	add rdi, FB_PITCH
+
+	dec r14d
+	jnz .k_row_loop
+
+.k_done:
+	pop r15
+	pop r14
+	pop r13
+	pop r12
+	pop rbx
+	leave
+	ret
+
 %endif

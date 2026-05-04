@@ -8,17 +8,27 @@ default rel
 %include "blit.inc.asm"
 %include "tilemap.inc.asm"
 %include "worldgen.inc.asm"
+%include "entity.inc.asm"
+%include "entity_player.inc.asm"
 %include "debug.inc.asm"
 
 section .data
 	window_title		db "Town Assembly", 0
 	tile_ppm_file		db "res/tiles.ppm", 0
+	sprites_ppm_file	db "res/sprites.ppm", 0
 	scale_quality_hint  db "SDL_RENDER_SCALE_QUALITY", 0
 	scale_quality_value db "0", 0 ; "0" = nearest-neighbour
 
 	%define TILES_X		  (WINDOW_W  / TILE_SIZE)
 	%define TILES_Y		  (WINDOW_H / TILE_SIZE)
-	; == SDL error messages ==
+
+	; -- sprite/movement constants --
+	%define SPRITE_SIZE			16
+	%define SPRITE_COLOR_KEY	0xFFFF00FF ; magenta
+	%define WORLD_PIXEL_W		(MAP_WIDTH  * TILE_SIZE)
+	%define WORLD_PIXEL_H		(MAP_HEIGHT * TILE_SIZE)
+	move_step			equ 1				; player px/frame
+	; -- SDL error messages --
 	; 10 = \n, 0 = C-style string terminator:
 	err_init_msg		db "SDL_Init failed", 10, 0 
 	err_window_msg		db "SDL_CreateWindow failed", 10, 0
@@ -38,11 +48,18 @@ section .data
 	log_msg_itered		db "iterated cellular automata", 0
 	log_msg_hud_toggles	db "hud toggled", 0
 
+; SDL_GetKeyboardState
+; returns ptr to a uint8[] indexed by scancode
+; ptr is stable, so we're caching it once after SDL_Init
+; into the sdl_keystate below
+extern SDL_GetKeyboardState
+
 section .bss ; uninitialised buffers
 	alignb 8
 	sdl_window			resq 1
 	sdl_renderer 		resq 1
 	sdl_texture			resq 1
+	sdl_keystate		resq 1
 	current_scale		resq 1
 
 	; input state
@@ -52,6 +69,15 @@ section .bss ; uninitialised buffers
 	key_toggle_pressed	resb 1
 	key_iterateworld_pressed	resb 1
 	key_restart_pressed	resb 1
+
+	; player state - source of truth TODO: extract for collision etc
+	alignb 4
+	player_x			resd 1 ; pixel coords (centre of sprite atm)
+	player_y			resd 1
+	player_facing		resd 1 ; FACE_DOWN/UP/etc (entity.inc.asm)
+	player_anim_phase	resd 1 ; 0 or 1 - which walk frame atm
+	player_anim_timer	resd 1 ; counts up to ANIM_PERIOD
+	player_moved		resb 1 ; did we move this frame?
 
 	; fps tracking
 	alignb 4
@@ -71,8 +97,19 @@ main: ; stack alignment:
 
 	; load tile atlas - tiles.ppm
 	; must be 16^2px tiles, and match tile types in tilemap.inc.asm
-	lea rdi, [tile_ppm_file]
-	call load_ppm
+	lea rdi, [atlas_tex]
+	lea rsi, [tile_ppm_file]
+	call load_ppm_texture
+	test eax, eax
+	jnz .fail_ppm
+
+	; load sprite sheet - sprites.ppm
+	; layout: row of 16x16 sprites, slots 0..N magenta = transparent
+	; expected slots atm:
+	; 0=down-facing|1=up-facing|2=left-walk_1|3:left-walk_2
+	lea rdi, [sprites_tex]
+	lea rsi, [sprites_ppm_file]
+	call load_ppm_texture
 	test eax, eax
 	jnz .fail_ppm
 
@@ -83,6 +120,18 @@ main: ; stack alignment:
 	mov [current_seed], eax ; store current seed for HUD
 	call generate_world
 	;call init_tilemap_test
+
+	; wipe the entity table - no entities yet, just scaffolding for now.
+	; later steps will spawn the player + NPCs after this.
+	call entity_clear_all
+
+	; player start/defaults - centre of map facing down for now
+	mov dword [player_x], WORLD_PIXEL_W / 2
+	mov dword [player_y], WORLD_PIXEL_H / 2
+	mov dword [player_facing], FACE_DOWN
+	mov dword [player_anim_phase], 0
+	mov dword [player_anim_timer], 0
+	mov byte  [player_moved], 0
 
 	lea rdi, [log_msg_started]
 	call debug_log
@@ -101,6 +150,14 @@ main: ; stack alignment:
 	test eax, eax
 	jnz .fail_init
 
+	; cache the keyboard-state pointer
+	; SDL apparently guarantees this stays valid for our window's
+	; lifetime, so we only need to fetch it once
+	; passing null for the optional numkeys-out param
+	xor edi, edi
+	call SDL_GetKeyboardState
+	mov [sdl_keystate], rax
+
 	; window titl, pos, scale
 	lea rdi, [window_title]
 	mov esi, SDL_WINDOWPOS_CENTERED
@@ -115,6 +172,7 @@ main: ; stack alignment:
 
 	mov rdi, [sdl_window]
 	mov esi, -1
+	mov edx, SDL_RENDERER_ACCELERATED | SDL_RENDERER_PRESENTVSYNC
 	call SDL_CreateRenderer
 	test rax, rax
 	jz .fail_renderer
@@ -177,6 +235,14 @@ main: ; stack alignment:
 	mov eax, [rng_state]
 	mov [current_seed], eax
 	call generate_world
+	call entity_clear_all
+	; place the player at centre again with new sprite defaults
+	mov dword [player_x], WORLD_PIXEL_W / 2
+	mov dword [player_y], WORLD_PIXEL_H / 2
+	mov dword [player_facing], FACE_DOWN
+	mov dword [player_anim_phase], 0
+	mov dword [player_anim_timer], 0
+	mov byte  [player_moved], 0
 	lea rdi, [log_msg_restart]
 	call debug_log
 
@@ -190,6 +256,8 @@ main: ; stack alignment:
 	call debug_log
 
 .no_toggle:
+	; --- player movement ---
+	call update_player_input
 	; --- fps calculation ---
 	; sampling every 500ms and scaling up
 	;
@@ -221,7 +289,11 @@ main: ; stack alignment:
 .fps_done:
 
 	; --- render ---
+	lea rdi, [atlas_tex]
 	call draw_tilemap 
+
+	; player on top of tiles
+	call draw_player
 
 	; ------ draw debug hud (if enabled) ------
 	call is_debug_hud_enabled
@@ -293,6 +365,9 @@ main: ; stack alignment:
 
 .cleanup:
 	; === end main ===
+	lea rdi, [atlas_tex]
+	call free_texture
+	lea rdi, [sprites_tex]
 	call free_texture
 	mov rdi, [sdl_texture]
 	call SDL_DestroyTexture
@@ -306,6 +381,12 @@ main: ; stack alignment:
 	ret		; returns to crt1.o which calls exit()
 
 .fail_ppm:
+	; could be either atlas or sprites load that failed; free both
+	; free_texture seems null-safe so an uninit struct is fine
+	lea rdi, [atlas_tex]
+	call free_texture
+	lea rdi, [sprites_tex]
+	call free_texture
 	lea rdi, [err_ppm_msg]
 	call print_error
 	mov eax, 1
@@ -314,6 +395,9 @@ main: ; stack alignment:
 .fail_init:
 	lea rdi, [err_init_msg]
 	call print_error
+	lea rdi, [atlas_tex]
+	call free_texture
+	lea rdi, [sprites_tex]
 	call free_texture
 	mov eax, 1 ; exit code
 	leave
@@ -321,6 +405,9 @@ main: ; stack alignment:
 .fail_window:
 	lea rdi, [err_window_msg]
 	call print_error
+	lea rdi, [atlas_tex]
+	call free_texture
+	lea rdi, [sprites_tex]
 	call free_texture
 	call SDL_Quit
 	mov eax, 1
@@ -329,6 +416,9 @@ main: ; stack alignment:
 .fail_renderer:
 	lea rdi, [err_renderer_msg]
 	call print_error
+	lea rdi, [atlas_tex]
+	call free_texture
+	lea rdi, [sprites_tex]
 	call free_texture
 	mov rdi, [sdl_window]
 	call SDL_DestroyWindow
@@ -339,6 +429,9 @@ main: ; stack alignment:
 .fail_texture:
 	lea rdi, [err_texture_msg]
 	call print_error
+	lea rdi, [atlas_tex]
+	call free_texture
+	lea rdi, [sprites_tex]
 	call free_texture
 	mov rdi, [sdl_renderer]
 	call SDL_DestroyRenderer
@@ -427,3 +520,211 @@ print_error:
 	syscall
 	pop rbp
 	ret
+
+;================================================================
+; update_player_input: poll arrow keys and move/animate
+;----------------------------------------------------------------
+; runs once per frame. checks each dir independently for diags
+; sets player_facing to the most-recent pressed direction for now
+; updates player_anim_phase based on whether anything moved
+;================================================================
+update_player_input:
+	push rbp
+	mov rbp, rsp
+
+	mov byte [player_moved], 0
+
+	; -- left? --
+	mov rax, [sdl_keystate]
+	movzx ecx, byte [rax + SCANCODE_LEFT]
+	test ecx, ecx
+	jz .not_left
+	mov dword [player_facing], FACE_LEFT
+	mov edi, -move_step
+	xor esi, esi
+	call try_move
+.not_left:
+	; -- right? --
+	mov rax, [sdl_keystate]
+	movzx ecx, byte [rax + SCANCODE_RIGHT]
+	test ecx, ecx
+	jz .not_right
+	mov dword [player_facing], FACE_RIGHT
+	mov edi, move_step
+	xor esi, esi
+	call try_move
+.not_right:
+	; -- up? --
+	mov rax, [sdl_keystate]
+	movzx ecx, byte [rax + SCANCODE_UP]
+	test ecx, ecx
+	jz .not_up
+	mov dword [player_facing], FACE_UP
+	xor edi, edi
+	mov esi, -move_step
+	call try_move
+.not_up:
+	; -- down? --
+	mov rax, [sdl_keystate]
+	movzx ecx, byte [rax + SCANCODE_DOWN]
+	test ecx, ecx
+	jz .not_down
+	mov dword [player_facing], FACE_DOWN
+	xor edi, edi
+	mov esi, move_step
+	call try_move
+.not_down:
+
+	; --- animation ---
+	; if moved this frame?: tick the timer, toggle phase on overflow
+	; if idle?: reset to phase 0 so we always come to rest in pose 0
+	cmp byte [player_moved], 0
+	je .anim_idle
+	inc dword [player_anim_timer]
+	cmp dword [player_anim_timer], ANIM_PERIOD
+	jl .anim_done
+	mov dword [player_anim_timer], 0
+	xor dword [player_anim_phase], 1
+	jmp .anim_done
+.anim_idle:
+	mov dword [player_anim_timer], 0
+	mov dword [player_anim_phase], 0
+.anim_done:
+	pop rbp
+	ret
+
+;================================================================
+; try_move: nudge the player by (dx, dy), clamping to world bounds
+;----------------------------------------------------------------
+; TODO: fairly placeholder-y, need to modulate speed and do
+; collision handling
+;----------------------------------------------------------------
+; in: edi = dx, esi = dy
+;================================================================
+try_move:
+	; new_x = clamp(player_x + dx, 0, WORLD_PIXEL_W - 1)
+	mov eax, [player_x]
+	add eax, edi
+	test eax, eax
+	jns .x_not_neg
+	xor eax, eax
+.x_not_neg:
+	cmp eax, WORLD_PIXEL_W - 1
+	jle .x_in_range
+	mov eax, WORLD_PIXEL_W - 1
+.x_in_range:
+	cmp eax, [player_x]
+	je .x_unchanged
+	mov [player_x], eax
+	mov byte [player_moved], 1
+.x_unchanged:
+
+	; new_y = clamp(player_y + dy, 0, WORLD_PIXEL_H - 1)
+	mov eax, [player_y]
+	add eax, esi
+	test eax, eax
+	jns .y_not_neg
+	xor eax, eax
+.y_not_neg:
+	cmp eax, WORLD_PIXEL_H - 1
+	jle .y_in_range
+	mov eax, WORLD_PIXEL_H - 1
+.y_in_range:
+	cmp eax, [player_y]
+	je .y_unchanged
+	mov [player_y], eax
+	mov byte [player_moved], 1
+.y_unchanged:
+	ret
+
+;================================================================
+; draw_player: blit the player sprite at (player_x, player_y)
+;----------------------------------------------------------------
+; sprite slot pick (4-frame layout: 0 d, 1 u, 2 left-A, 3 left-B):
+;	facing DOWN		-> slot 0, flip alternates with phase
+;	facing UP		-> slot 1, flip alternates with phase
+;	facing LEFT		-> slot 2 or 3 by phase, no flip
+;	facing RIGHT	-> slot 2 or 3 by phase, flipped
+;
+; player_x/y are the centre of the sprite for now,
+; so dst_x = x - SPRITE_SIZE/2
+; 
+; TODO: extract to some generic draw_entities for other NPCs
+;================================================================
+draw_player:
+	push rbp
+	mov rbp, rsp
+	push rbx
+	push r12
+	push r13
+	sub rsp, 8		; align
+
+	; pick pose
+	; r12d = slot, r13d = flip? (0/1)
+	xor r12d, r12d
+	xor r13d, r13d
+	mov eax, [player_facing]
+	cmp eax, FACE_DOWN
+	je .pp_down
+	cmp eax, FACE_UP
+	je .pp_up
+	cmp eax, FACE_LEFT
+	je .pp_left
+	; right
+	mov r12d, 2
+	add r12d, [player_anim_phase]
+	mov r13d, 1
+	jmp .pose_done
+.pp_left:
+	mov r12d, 2
+	add r12d, [player_anim_phase]
+	jmp .pose_done
+.pp_down:
+	mov r13d, [player_anim_phase]
+	jmp .pose_done
+.pp_up:
+	mov r12d, 1
+	mov r13d, [player_anim_phase]
+.pose_done:
+
+	; dst_x = player_x - SPRITE_SIZE/2 (player_x is sprite centre)
+	mov ebx, [player_x]
+	sub ebx, SPRITE_SIZE/2
+
+	; dst_y = player_y - SPRITE_SIZE/2 (in eax for the push)
+	mov eax, [player_y]
+	sub eax, SPRITE_SIZE/2
+
+	; --- push stack args for blit_texture_rect_keyed ---
+	; layout the blit expects (relative to its rbp):
+	;   [rbp+16] = dst_y, [rbp+24] = flip, [rbp+32] = key
+	; push rtl: key, flip, dst_y
+	; 3 pushes = 24 bytes:  16-aligned coming in (caller convention),
+	; so add an 8-byte pad first to land 16-aligned at the call
+	sub rsp, 8					; alignment pad
+	mov rcx, SPRITE_COLOR_KEY
+	push rcx					; key
+	movsxd rdx, r13d
+	push rdx					; flip
+	cdqe						; dst_y currently in eax; sign-extend
+	push rax					; dst_y
+
+	; register args
+	lea rdi, [sprites_tex]
+	mov esi, r12d
+	imul esi, SPRITE_SIZE		; src_x
+	xor edx, edx				; src_y = 0
+	mov ecx, SPRITE_SIZE		; src_w
+	mov r8d, SPRITE_SIZE		; src_h
+	mov r9d, ebx				; dst_x
+
+	call blit_texture_rect_keyed
+	add rsp, 32					; 24 args + 8 pad
+
+	add rsp, 8
+	pop r13
+	pop r12
+	pop rbx
+	pop rbp
+	ret
+

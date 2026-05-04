@@ -139,6 +139,8 @@ init_tilemap_test:
 ; or fully offscreen should just work.. TODO: test
 ; for big scrollable maps we'll prob need to just iterate the
 ; visible range, but for small map for now i'm not bothering
+;----------------------------------------------------------------
+; in: rdi = ptr to texture struct (the atlas/spritesheet)
 ;================================================================
 draw_tilemap:
 	push rbp
@@ -150,7 +152,8 @@ draw_tilemap:
 	push r14
 	push r15
 
-	; locals: [rbp-4]:ty, [rbp-8]:tx
+	; locals: [rbp-4]:ty, [rbp-8]:tx, [rbp-16]:tex_ptr
+	mov [rbp-16], rdi ; save tex ptr; we'll re-pass it each blit call
 	xor eax, eax
 	mov [rbp-4], eax	; ty = 0
 .row:
@@ -172,32 +175,38 @@ draw_tilemap:
 	movzx r12d, byte [rbx + rax]	; r12d = tile_ID
 
 	; -- compute blit args --
-	; ref (copied from blit.inc.asm:)
-	; 	edi |  src_x	(texel x in )
-	; 	edi |  src_x	(texel x in source texture)
-	;	esi |  src_y	(texel y in source texture)
-	; 	edx |  src_w	(width in texels)
-	; 	ecx |  src_h	(height in texels)
-	; 	r8d |  dst_x	(pixel x on framebuffer)
-	; 	r9d |  dst_y	(pixel y on framebuffer)
+	;	rdi |  tex_ptr
+	; 	esi |  src_x	(texel x in source texture)
+	;	edx |  src_y	(texel y in source texture)
+	; 	ecx |  src_w	(width in texels)
+	; 	r8d |  src_h	(height in texels)
+	; 	r9d |  dst_x	(pixel x on framebuffer)
+	; 	[rsp+8]  | dst_y (pushed)
+	; 	[rsp+16] | flip  (pushed; always 0 for tiles)
+	mov rdi, [rbp-16]	; tex ptr
 	; src_x = tile_ID * TILE_SIZE (aka column)
-	mov edi, r12d
-	imul edi, TILE_SIZE
+	mov esi, r12d
+	imul esi, TILE_SIZE
 	; src_y = 0 (TMP, just one row for now)
-	xor esi, esi
+	xor edx, edx
 	; src_w, src_h = one tile
-	mov edx, TILE_SIZE
 	mov ecx, TILE_SIZE
+	mov r8d, TILE_SIZE
 	; dst_x = tx * TILE_SIZE - camera_x
-	mov r8d, [rbp-8]
-	imul r8d, TILE_SIZE
-	sub r8d, [camera_x] ; even if no real offset yet
-	; dst_y = ty * TILE_SIZE - camera_y
-	mov r9d, [rbp-4]
+	mov r9d, [rbp-8]
 	imul r9d, TILE_SIZE
-	sub r9d, [camera_y]
-
+	sub r9d, [camera_x] ; even if no real offset yet
+	; dst_y = ty * TILE_SIZE - camera_y, pushed as a qword
+	mov eax, [rbp-4]
+	imul eax, TILE_SIZE
+	sub eax, [camera_y]
+	cdqe				; sign-extend to rax for the push
+	; blitter expects 2 stack args: dst_y, then flip,push them
+	; right-to-left so dst_y ends up at [rsp+8] and flip at [rsp+16]
+	push 0				; flip = 0 (tiles don't flip.. yet)
+	push rax			; dst_y
 	call blit_texture_rect
+	add rsp, 16			; pop both args
 
 	inc dword [rbp-8]
 	jmp .col ;next

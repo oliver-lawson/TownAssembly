@@ -51,7 +51,7 @@ extern SDL_RenderSetLogicalSize
 %define SDL_QUIT_EVENT		0x100
 %define SDL_KEYDOWN_EVENT	0x300
 
-; scancodes.  using these instead of keycodes for size & no key repeat headache)
+; scancodes
 ; https://github.com/libsdl-org/SDL/blob/SDL2/include/SDL_scancode.h
 %define SCANCODE_LEFT		80
 %define SCANCODE_RIGHT		79
