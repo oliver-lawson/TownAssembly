@@ -555,7 +555,7 @@ debug_render_log:
 	; print the text
 	mov edi, 4				; x = 4, small left margin
 	mov esi, r14d
-	mov edx, 0xFFFFFFFF		; white
+	mov edx, 0xFF000000		; black
 	mov rcx, rbx
 	call debug_print
 

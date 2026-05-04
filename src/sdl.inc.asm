@@ -59,6 +59,8 @@ extern SDL_RenderSetLogicalSize
 %define SCANCODE_DOWN		81
 %define SCANCODE_ESCAPE		41
 %define SCANCODE_F3  		60
+%define SCANCODE_F4  		61
+%define SCANCODE_F5  		62
 
 ; SDL_Event layout (we only care about the bits we use)
 ;   offset 0:  Uint32 type

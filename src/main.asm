@@ -7,6 +7,7 @@ default rel
 %include "texture.inc.asm"
 %include "blit.inc.asm"
 %include "tilemap.inc.asm"
+%include "worldgen.inc.asm"
 %include "debug.inc.asm"
 
 section .data
@@ -27,22 +28,30 @@ section .data
 
 	; HUD text
 	hud_label_fps		db "fps", 0
-	hud_help			db "F3 hud  ESC quit"
+	hud_label_iters		db "iters", 0
+	hud_label_seed		db "seed", 0
+	hud_help			db "F3 hud  F5 restart  ESC quit", 0
 
 	; log messages
-	log_msg_started		db "tilemap loaded"
-	log_msg_hud_toggles	db "hud toggled"
+	log_msg_started		db 0x1, " world generated! ", 0x3, 0
+	log_msg_restart		db "regenerated world", 0
+	log_msg_itered		db "iterated cellular automata", 0
+	log_msg_hud_toggles	db "hud toggled", 0
 
 section .bss ; uninitialised buffers
 	alignb 8
 	sdl_window			resq 1
 	sdl_renderer 		resq 1
 	sdl_texture			resq 1
-	current_scale       resq 1
+	current_scale		resq 1
 
 	; input state
+		; - sustained -
 	key_quit			resb 1
-	key_toggle_pressed	resb 1	; one-shot/cleared after read
+		; - one shots -
+	key_toggle_pressed	resb 1
+	key_iterateworld_pressed	resb 1
+	key_restart_pressed	resb 1
 
 	; fps tracking
 	alignb 4
@@ -50,6 +59,7 @@ section .bss ; uninitialised buffers
 	last_fps_ticks		resd 1	; SDL_GetTicks value @ last fps sample
 	last_fps_frame		resd 1	; frame_count @ last fps sample
 	current_fps			resd 1	; final computed fps for display
+	current_seed		resd 1	; stash for HUD
 
 	alignb 8
 	event_buf			resb SDL_EVENT_SIZE
@@ -66,8 +76,13 @@ main: ; stack alignment:
 	test eax, eax
 	jnz .fail_ppm
 
-	; TMP
-	call init_tilemap_test
+	; seed rng and generate world
+	;call rng_seed_from_time
+	mov [rng_state], byte 1
+	mov eax, [rng_state]
+	mov [current_seed], eax ; store current seed for HUD
+	call generate_world
+	;call init_tilemap_test
 
 	lea rdi, [log_msg_started]
 	call debug_log
@@ -138,13 +153,42 @@ main: ; stack alignment:
 	cmp byte [key_quit], 0
 	jne .cleanup
 
-	; handle one shot keys
+	; --- handle one shot keys ---
+
+	; F4: iterate wordlgen CA
+	cmp byte [key_iterateworld_pressed], 0
+	je .no_iterateworld
+	mov byte [key_iterateworld_pressed], 0
+	; iterate world
+	call iterate_world
+	lea rdi, [log_msg_itered]
+	call debug_log
+
+
+.no_iterateworld:
+	; F5: restart game
+	cmp byte [key_restart_pressed], 0
+	je .no_restart
+	mov byte [key_restart_pressed], 0
+	; restart pressed
+	;call rng_seed_from_time
+	call reset_world_iterations
+	call rng_next
+	mov eax, [rng_state]
+	mov [current_seed], eax
+	call generate_world
+	lea rdi, [log_msg_restart]
+	call debug_log
+
+.no_restart:
+	; F3: toggle HUD
 	cmp byte [key_toggle_pressed], 0
 	je .no_toggle
 	mov byte [key_toggle_pressed], 0
 	call debug_toggle
 	lea rdi, [log_msg_hud_toggles]
 	call debug_log
+
 .no_toggle:
 	; --- fps calculation ---
 	; sampling every 500ms and scaling up
@@ -191,6 +235,23 @@ main: ; stack alignment:
 	lea rcx, [hud_label_fps]
 	mov r8d, [current_fps]
 	call debug_print_label_int
+	; iterations
+	add eax, 8 ; bit of a gap between labels
+	mov edi, eax
+	mov esi, 4
+	mov edx, 0xFF0033AA
+	lea rcx, [hud_label_iters]
+	mov r8d, [ca_iterations_count]
+	call debug_print_label_int
+	; seed
+	add eax, 8 ; bit of a gap between labels
+	mov edi, eax
+	mov esi, 4
+	mov edx, 0xFF000000
+	lea rcx, [hud_label_seed]
+	mov r8d, [current_seed]
+	call debug_print_label_int
+
 	; second line: help text
 	mov edi, 4
 	mov esi, 14
@@ -321,6 +382,10 @@ process_sdl_events:
 	je .key_escape
 	cmp eax, SCANCODE_F3
 	je .key_f3
+	cmp eax, SCANCODE_F4
+	je .key_f4
+	cmp eax, SCANCODE_F5
+	je .key_f5
 	jmp .poll
 
 .key_escape:
@@ -328,6 +393,12 @@ process_sdl_events:
 	jmp .poll
 .key_f3:
 	mov byte [key_toggle_pressed], 1
+	jmp .poll
+.key_f4:
+	mov byte [key_iterateworld_pressed], 1
+	jmp .poll
+.key_f5:
+	mov byte [key_restart_pressed], 1
 	jmp .poll
 
 .done:
