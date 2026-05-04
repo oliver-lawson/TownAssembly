@@ -1,4 +1,4 @@
-; io_ppm.inc.asm - load PPM (P6) files into shared texture buffer
+; io_ppm.inc.asm - load PPM (P6) files into a texture struct
 ;
 ; format spec:
 ; "P6"		- magic
@@ -15,10 +15,9 @@
 ; 2. parse the header
 ; 3. convert the pixel data into a malloc'd ARGB buffer
 ; 4. munmap to remove mmap
-; 5. ARGB buffer persists
+; 5. ARGB buffer persists, ptr is stored in the caller's tex struct
 ;
-; writes into tex_pixels, tex_width, tex_height
-; which live in texture.inc.asm and includes this file
+; the texture struct layout is defined in texture.inc.asm.
 
 %ifndef IO_PPM_INC
 %define IO_PPM_INC
@@ -48,8 +47,9 @@ section .bss
 section .text
 
 ;================================================================
-; load_ppm: read a P6 PPM file into tex_pixels as ARGB
-; in:		rdi = ptr to null-terminated filename
+; load_ppm_texture: read a P6 PPM file into a texture struct
+; in:		rdi = ptr to texture struct (TEX_STRUCT_SIZE bytes)
+;			rsi = ptr to null-terminated filename
 ; out:		eax = 0 on success, nonzero on fail
 ;----------------------------------------------------------------
 ; stack frame:
@@ -58,8 +58,9 @@ section .text
 ;	[rbp-24]   = file size
 ;	[rbp-32]   = parser cursor (byte ptr into mmap'd file)
 ;	[rbp-40]   = end-of-file ptr
+;	[rbp-48]   = saved tex struct ptr
 ;================================================================
-load_ppm:
+load_ppm_texture:
 	push rbp
 	mov rbp, rsp
 	sub rsp, 64
@@ -70,9 +71,11 @@ load_ppm:
 	push r14
 	push r15
 
+	mov [rbp-48], rdi			; save tex struct ptr
+
 	; --- open(filename, O_RDONLY) ---
-	; rdi already has filename in
-	; flags ref: man 2 open
+	; rsi has the filename, move it to rdi for the syscall
+	mov rdi, rsi
 	mov esi, O_RDONLY
 	xor edx, edx
 	call open
@@ -125,14 +128,16 @@ load_ppm:
 	call .parse_uint
 	test eax, eax
 	js .fail_unmap			; negative = parse error
-	mov [tex_width], eax
+	mov rdx, [rbp-48]		; tex struct ptr
+	mov [rdx + TEX_WIDTH_OFF], eax
 	mov r12d, eax			; r12 = width
 
 	call .skip_ws_and_comments
 	call .parse_uint
 	test eax, eax
 	js .fail_unmap
-	mov [tex_height], eax
+	mov rdx, [rbp-48]
+	mov [rdx + TEX_HEIGHT_OFF], eax
 	mov r13d, eax			; r13 = height
 
 	call .skip_ws_and_comments
@@ -159,7 +164,8 @@ load_ppm:
 	call malloc
 	test rax, rax
 	jz .fail_unmap
-	mov [tex_pixels], rax
+	mov rdx, [rbp-48]		; tex struct ptr
+	mov [rdx + TEX_PIXELS_OFF], rax
 	mov r15, rax			; r15 = dest cursor
 
 	; --- convert RGB -> ARGB ---
@@ -203,9 +209,11 @@ load_ppm:
 
 .convert_short:
 	; got partway through but ran out of data; free the buffer
-	mov rdi, [tex_pixels]
+	mov rdx, [rbp-48]		; tex struct ptr
+	mov rdi, [rdx + TEX_PIXELS_OFF]
 	call free
-	mov qword [tex_pixels], 0
+	mov rdx, [rbp-48]
+	mov qword [rdx + TEX_PIXELS_OFF], 0
 .fail_unmap:
 	mov rdi, [rbp-16]			; mmap ptr
 	mov rsi, [rbp-24]			; fs

@@ -2,7 +2,7 @@
 ; 
 ; the main workhorse for tile drawing
 ; 
-; copy an axis-aligned rect from loaded texture into the fb
+; copy an axis-aligned rect from a texture into the fb
 ; no rotation/filtering/UV interp, just fast rect-to-rect copy
 ;
 ; should be much faster for our tilemaps than going thrrough
@@ -20,7 +20,8 @@ section .text
 ; blit_texture_rect: copy a rect from texture to framebuffer
 ;----------------------------------------------------------------
 ; C equiv:
-; void blit_texture_rect( int src_x, int src_y,
+; void blit_texture_rect( tex_struct *tex,
+;						  int src_x, int src_y,
 ;						  int src_w, int src_h,
 ;						  int dst_x, int dst_y) {
 ;	// clip dst to screen, adjusting src to match
@@ -30,27 +31,24 @@ section .text
 ;	if (dst_y + src_h > WINDOW_H) src_h = WINDOW_H - dst_y;
 ;	if (src_w <= 0 || src_h <= 0) return;
 ;
-;	uint32_t *src = tex_pixels + src_y * tex_width + src_x;
+;	uint32_t *src = tex->pixels + src_y * tex->width + src_x;
 ;	uint32_t *dst = framebuffer + dst_y * WINDOW_W + dst_x;
 ;	for (int row = 0; row < src_h; row++) {
 ;		memcpy(dst, src, src_w * 4);
-;		src += tex_width;
+;		src += tex->width;
 ;		dst += WINDOW_W;
 ;		}
 ;   }
 ;----------------------------------------------------------------
 ; in's:
 ;----------------------------------------------------------------
-; edi |  src_x	(texel x in )
-; edi |  src_x	(texel x in source texture)
-; esi |  src_y	(texel y in source texture)
-; edx |  src_w	(width in texels)
-; ecx |  src_h	(height in texels)
-; r8d |  dst_x	(pixel x on framebuffer)
-; r9d |  dst_y	(pixel y on framebuffer)
-;
-; the source texture is whatever's in tex_pixels (via load_ppm atm)
-; not passing a texture pointer atm with just one texture
+; rdi |  tex_ptr	(ptr to texture struct - see texture.inc.asm)
+; esi |  src_x	(texel x in source texture)
+; edx |  src_y	(texel y in source texture)
+; ecx |  src_w	(width in texels)
+; r8d |  src_h	(height in texels)
+; r9d |  dst_x	(pixel x on framebuffer)
+; [rsp+8] | dst_y	(pixel y on fb - on stack cos no more regs)
 ;================================================================
 blit_texture_rect:
 	push rbp
@@ -62,17 +60,24 @@ blit_texture_rect:
 	push r14
 	push r15
 
-	; stash all six args into stack locals so we can modify them
+	; stash all args into stack locals so we can modify them
 	; during clipping without losing the originals
 	;	[rbp-4]  src_x	[rbp-8]  src_y
 	;	[rbp-12] src_w	[rbp-16] src_h
 	;	[rbp-20] dst_x	[rbp-24] dst_y
-	mov [rbp-4],  edi
-	mov [rbp-8],  esi
-	mov [rbp-12], edx
-	mov [rbp-16], ecx
-	mov [rbp-20], r8d
-	mov [rbp-24], r9d
+	;	[rbp-32] tex_ptr (qword, aligned)
+	mov [rbp-4],  esi
+	mov [rbp-8],  edx
+	mov [rbp-12], ecx
+	mov [rbp-16], r8d
+	mov [rbp-20], r9d
+	; dst_y was passed on the stack. before our prologue it was at
+	; [rsp+8] (above ret addr). after push rbp + sub rsp,64 + 5
+	; pushes (40 bytes), it's at [rbp+16] (caller's [rsp+8] relative
+	; to original rsp, which is rbp+8, so caller's [rsp+8] = [rbp+16])
+	mov eax, [rbp+16]
+	mov [rbp-24], eax
+	mov [rbp-32], rdi			; save tex ptr
 
 	; --- clip left edge ---
 	; if dst_x<0, the tile starts offscreen to the left
@@ -120,12 +125,16 @@ blit_texture_rect:
 
 	; --- set up pointers for the copy loop ---
 
-	; src base = tex_pixels + (src_y * tex_width + src_x) * 4
+	; load tex fields once - we use W twice (initial offset + pitch)
+	mov rbx, [rbp-32]		; tex ptr
+	mov r15d, [rbx + TEX_WIDTH_OFF]	; r15d = tex_width
+
+	; src base = tex->pixels + (src_y * tex_width + src_x) * 4
 	mov eax, [rbp-8]		; src_y
-	imul eax, [tex_width]	; src_y * tex_width
+	imul eax, r15d			; src_y * tex_width
 	add eax, [rbp-4]		; + src_x
 	shl rax, 2				; * 4 bytes per pixel
-	add rax, [tex_pixels]	; + base pointer
+	add rax, [rbx + TEX_PIXELS_OFF]	; + base pointer
 	mov rsi, rax			; rsi = source row pointer
 
 	; dst base = framebuffer + (dst_y * WINDOW_W + dst_x) * 4
@@ -137,10 +146,10 @@ blit_texture_rect:
 	add rdi, rax			; rdi = dest row pointer
 
 	; row strides (bytes to advance per row)
-	mov r12d, [tex_width]
+	mov r12d, r15d
 	shl r12d, 2				; src pitch = tex_width * 4
 	mov r13d, FB_PITCH		; dst pitch = WINDOW_W * 4
-	mov r14d, [rbp-16]		; rows remaining%endif
+	mov r14d, [rbp-16]		; rows remaining
 
 	; -- row copy loop ---
 	; using rep movsd to try and copy one row at a time
