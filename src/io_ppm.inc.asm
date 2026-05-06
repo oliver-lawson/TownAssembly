@@ -53,12 +53,12 @@ section .text
 ; out:		eax = 0 on success, nonzero on fail
 ;----------------------------------------------------------------
 ; stack frame:
-;	[rbp-8]    = file descriptor
-;	[rbp-16]   = mmap'd ptr
-;	[rbp-24]   = file size
-;	[rbp-32]   = parser cursor (byte ptr into mmap'd file)
-;	[rbp-40]   = end-of-file ptr
-;	[rbp-48]   = saved tex struct ptr
+;	[rbp-8]		= file descriptor
+;	[rbp-16]	= mmap'd ptr
+;	[rbp-24]	= file size
+;	[rbp-32]	= parser cursor (byte ptr into mmap'd file)
+;	[rbp-40]	= end-of-file ptr
+;	[rbp-48]	= saved tex struct ptr
 ;================================================================
 load_ppm_texture:
 	push rbp

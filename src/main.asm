@@ -78,6 +78,12 @@ section .bss ; uninitialised buffers
 	player_anim_phase	resd 1 ; 0 or 1 - which walk frame atm
 	player_anim_timer	resd 1 ; counts up to ANIM_PERIOD
 	player_moved		resb 1 ; did we move this frame?
+	; movement accumulator for fractional-speed tiles:
+	; each move attempt adds the destination tile's speed percent:
+	; when it reaches 100 we apply the step and subtract
+	; eg water at 50 = step every 2 frames.
+	alignb 4
+	move_accum			resd 1
 
 	; fps tracking
 	alignb 4
@@ -121,10 +127,6 @@ main: ; stack alignment:
 	call generate_world
 	;call init_tilemap_test
 
-	; wipe the entity table - no entities yet, just scaffolding for now.
-	; later steps will spawn the player + NPCs after this.
-	call entity_clear_all
-
 	; player start/defaults - centre of map facing down for now
 	mov dword [player_x], WORLD_PIXEL_W / 2
 	mov dword [player_y], WORLD_PIXEL_H / 2
@@ -132,6 +134,9 @@ main: ; stack alignment:
 	mov dword [player_anim_phase], 0
 	mov dword [player_anim_timer], 0
 	mov byte  [player_moved], 0
+
+	; place NPCs
+	call setup_world_entities
 
 	lea rdi, [log_msg_started]
 	call debug_log
@@ -243,6 +248,8 @@ main: ; stack alignment:
 	mov dword [player_anim_phase], 0
 	mov dword [player_anim_timer], 0
 	mov byte  [player_moved], 0
+	; + reset NPCs
+	call setup_world_entities
 	lea rdi, [log_msg_restart]
 	call debug_log
 
@@ -258,6 +265,24 @@ main: ; stack alignment:
 .no_toggle:
 	; --- player movement ---
 	call update_player_input
+
+	; mirror the player's position into entity[0] so the rest of the
+	; entity systems (collision/future fight stuff) see it correctly
+	call sync_player_to_entity
+
+	; tick all non-player entities
+	call entity_tick_all
+
+	; resolve overlaps between entities (radial pushback)
+	call entity_resolve_collisions
+
+	; advance the tile-animation tick
+	inc dword [tile_anim_ticks]
+
+	; centre camera on player, clamped to world bounds
+	call camera_update
+
+
 	; --- fps calculation ---
 	; sampling every 500ms and scaling up
 	;
@@ -292,8 +317,8 @@ main: ; stack alignment:
 	lea rdi, [atlas_tex]
 	call draw_tilemap 
 
-	; player on top of tiles
-	call draw_player
+	; entities (player + NPCs, y-sorted)
+	call draw_entities
 
 	; ------ draw debug hud (if enabled) ------
 	call is_debug_hud_enabled
@@ -522,6 +547,55 @@ print_error:
 	ret
 
 ;================================================================
+; camera_update: centre camera on player, clamped to world bounds
+;----------------------------------------------------------------
+; camera_x = clamp(player_x - WINDOW_W/2, 0, max_camera_x)
+; max_camera_x = max(0, WORLD_PIXEL_W - WINDOW_W) - if the world
+; is narrower than the window, we just stick the camera at 0
+;================================================================
+camera_update:
+	; --- x axis ---
+	mov eax, [player_x]
+	sub eax, WINDOW_W / 2
+
+	; max_camera_x = max(0, WORLD_PIXEL_W - WINDOW_W)
+	mov ecx, WORLD_PIXEL_W - WINDOW_W
+	test ecx, ecx
+	jns .max_x_ok
+	xor ecx, ecx
+.max_x_ok:
+	; clamp eax to [0, ecx]
+	test eax, eax
+	jns .x_not_neg
+	xor eax, eax
+.x_not_neg:
+	cmp eax, ecx
+	jle .x_done
+	mov eax, ecx
+.x_done:
+	mov [camera_x], eax
+
+	; --- y axis ---
+	mov eax, [player_y]
+	sub eax, WINDOW_H / 2
+
+	mov ecx, WORLD_PIXEL_H - WINDOW_H
+	test ecx, ecx
+	jns .max_y_ok
+	xor ecx, ecx
+.max_y_ok:
+	test eax, eax
+	jns .y_not_neg
+	xor eax, eax
+.y_not_neg:
+	cmp eax, ecx
+	jle .y_done
+	mov eax, ecx
+.y_done:
+	mov [camera_y], eax
+	ret
+
+;================================================================
 ; update_player_input: poll arrow keys and move/animate
 ;----------------------------------------------------------------
 ; runs once per frame. checks each dir independently for diags
@@ -594,76 +668,225 @@ update_player_input:
 	ret
 
 ;================================================================
-; try_move: nudge the player by (dx, dy), clamping to world bounds
+; try_move: nudge the player by (dx, dy), checking collision
 ;----------------------------------------------------------------
-; TODO: fairly placeholder-y, need to modulate speed and do
-; collision handling
+; reads the destination tile's speed %:
+; 0 blocks the move, 100 is full speed
+; partial speeds (eg water at 50) accumulate across calls and apply 
+; a step once the accumulator hits 100. should give nice slowing down
+; without needing fractional pixel coords (ints only so far!)
+;
+; if blocked, the accumulator is cleared so a held direction against
+; a wall doesn't build speed for when the wall ends
 ;----------------------------------------------------------------
 ; in: edi = dx, esi = dy
 ;================================================================
 try_move:
-	; new_x = clamp(player_x + dx, 0, WORLD_PIXEL_W - 1)
-	mov eax, [player_x]
-	add eax, edi
-	test eax, eax
-	jns .x_not_neg
-	xor eax, eax
-.x_not_neg:
-	cmp eax, WORLD_PIXEL_W - 1
-	jle .x_in_range
-	mov eax, WORLD_PIXEL_W - 1
-.x_in_range:
-	cmp eax, [player_x]
-	je .x_unchanged
-	mov [player_x], eax
-	mov byte [player_moved], 1
-.x_unchanged:
+	push rbp
+	mov rbp, rsp
+	push rbx
+	push r12
+	sub rsp, 8					; align
 
-	; new_y = clamp(player_y + dy, 0, WORLD_PIXEL_H - 1)
-	mov eax, [player_y]
-	add eax, esi
+	mov ebx, edi				; dx
+	mov r12d, esi				; dy
+
+	; destination pixel = (player_x + dx, player_y + dy)
+	mov edi, [player_x]
+	add edi, ebx
+	mov esi, [player_y]
+	add esi, r12d
+
+	call tile_speed_at_pixel	; eax = speed at dest
 	test eax, eax
-	jns .y_not_neg
-	xor eax, eax
-.y_not_neg:
-	cmp eax, WORLD_PIXEL_H - 1
-	jle .y_in_range
-	mov eax, WORLD_PIXEL_H - 1
-.y_in_range:
-	cmp eax, [player_y]
-	je .y_unchanged
-	mov [player_y], eax
+	jz .blocked
+
+	add [move_accum], eax
+	cmp dword [move_accum], 100
+	jl .not_yet
+
+	; accumulated enough - apply a full step
+	sub dword [move_accum], 100
+	add [player_x], ebx
+	add [player_y], r12d
 	mov byte [player_moved], 1
-.y_unchanged:
+
+.not_yet:
+	add rsp, 8
+	pop r12
+	pop rbx
+	pop rbp
+	ret
+
+.blocked:
+	mov dword [move_accum], 0 ;reset! see desc
+	add rsp, 8
+	pop r12
+	pop rbx
+	pop rbp
 	ret
 
 ;================================================================
-; draw_player: blit the player sprite at (player_x, player_y)
+; sync_player_to_entity: copy player_* into entity[0] before draw
 ;----------------------------------------------------------------
+; we keep player_* as the source of truth for input handling and HUD,
+; the entity table mirrors it so it gets y-sorted with everyone else
+;================================================================
+sync_player_to_entity:
+	xor edi, edi
+	call entity_ptr 	; rax = &entity[0]
+	mov edi, [player_x]
+	mov [rax + ENT_X_OFFSET], edi
+	mov edi, [player_y]
+	mov [rax + ENT_Y_OFFSET], edi
+	mov edi, [player_facing]
+	mov byte [rax + ENT_FACING_OFFSET], dil
+	mov edi, [player_anim_phase]
+	mov byte [rax + ENT_PHASE_OFFSET], dil
+	ret
+
+;================================================================
+; setup_world_entities: wipe + repopulate after a world regen
+;================================================================
+setup_world_entities:
+	push rbx
+	push r12
+	push r14
+	push r15
+	; 4 pushes = 32 bytes = 16-aligned; return addr handled by call
+	call entity_clear_all
+
+	; spawn player at i=0, w/ existing x/y from place_player_on_floor
+	; and default down facing
+	mov edi, ENT_TYPE_PLAYER
+	mov esi, [player_x]
+	mov edx, [player_y]
+	mov ecx, 0 			; sprite slot 0 (down-facing)
+	call entity_spawn
+
+	; reset player anim/facing state - new world, fresh start
+	mov dword [player_facing], FACE_DOWN
+	mov dword [player_anim_phase], 0
+	mov dword [player_anim_timer], 0
+	mov dword [move_accum], 0
+
+	; ebx = stubs spawned, r12d = attempts so far
+	; attempts are capped just in case
+	mov ebx, 0
+	mov r12d, 0
+.stub_loop:
+	cmp ebx, 30
+	jge .stubs_done
+	cmp r12d, 400
+	jge .stubs_done
+
+	inc r12d
+
+	; px = player_x + (rand[-15..15]) * TILE
+	mov edi, 31
+	call rng_range
+	sub eax, 15
+	imul eax, TILE_SIZE
+	add eax, [player_x]
+	mov r14d, eax			; r14 = candidate x
+
+	mov edi, 31
+	call rng_range
+	sub eax, 15
+	imul eax, TILE_SIZE
+	add eax, [player_y]
+	mov r15d, eax			; r15 = candidate y
+
+	; reject if not walkable
+	mov edi, r14d
+	mov esi, r15d
+	call tile_speed_at_pixel
+	cmp eax, 100
+	jne .stub_loop
+
+	; pick type/slot: 2/3 heroes, 1/3 monsters. roll 0..2
+	mov edi, 3
+	call rng_range
+	test eax, eax
+	jz .spawn_monster
+	; hero
+	mov edi, ENT_TYPE_HERO
+	mov esi, r14d
+	mov edx, r15d
+	mov ecx, 4				; hero base slot
+	call entity_spawn
+	jmp .check_spawn
+.spawn_monster:
+	mov edi, ENT_TYPE_MONSTER
+	mov esi, r14d
+	mov edx, r15d
+	mov ecx, 8				; monster base slot
+	call entity_spawn
+.check_spawn:
+	test eax, eax
+	js .stubs_done			; table full
+	inc ebx
+	jmp .stub_loop
+.stubs_done:
+	pop r15
+	pop r14
+	pop r12
+	pop rbx
+	ret
+
+;================================================================
+; draw_entities: y-sort the entity table and blit each alive entity
+;
 ; sprite slot pick (4-frame layout: 0 d, 1 u, 2 left-A, 3 left-B):
+;
+; pose selection only applies to PLAYER atm::
 ;	facing DOWN		-> slot 0, flip alternates with phase
 ;	facing UP		-> slot 1, flip alternates with phase
 ;	facing LEFT		-> slot 2 or 3 by phase, no flip
 ;	facing RIGHT	-> slot 2 or 3 by phase, flipped
 ;
-; player_x/y are the centre of the sprite for now,
-; so dst_x = x - SPRITE_SIZE/2
-; 
-; TODO: extract to some generic draw_entities for other NPCs
+; TEMP npcs just blit sprite directly
 ;================================================================
-draw_player:
+draw_entities:
 	push rbp
 	mov rbp, rsp
 	push rbx
 	push r12
 	push r13
-	sub rsp, 8		; align
+	push r14
+	push r15
+	sub rsp, 8						; align
 
-	; pick pose
-	; r12d = slot, r13d = flip? (0/1)
-	xor r12d, r12d
-	xor r13d, r13d
-	mov eax, [player_facing]
+	call entity_sort_draw_order
+
+	mov r14d, [entity_count]
+	xor r15d, r15d					; loop index
+.next:
+	cmp r15d, r14d
+	jge .done
+
+	lea rax, [entity_draw_order]
+	movzx ebx, byte [rax + r15]		; ebx = entity index
+
+	mov edi, ebx
+	call entity_ptr
+	mov r13, rax					; r13 = entity ptr
+
+	; skip dead
+	movzx eax, byte [r13 + ENT_FLAGS_OFFSET]
+	test eax, ENT_FLAG_ALIVE
+	jz .skip
+
+	; pose pick - works for any entity using the 4-frame layout
+	; (down, up, left-A, left-B). the entity's sprite_slot field is
+	; the *base* slot of its 4-frame block in the sprite sheet
+	;	facing DOWN  -> base+0, flip alternates with phase
+	;	facing UP	 -> base+1, flip alternates with phase
+	;	facing LEFT  -> base+2 or base+3 by phase, no flip
+	;	facing RIGHT -> base+2 or base+3 by phase, flipped
+	; very TEMP
+	movzx r12d, byte [r13 + ENT_SLOT_OFFSET]	; r12 = base slot
+	movzx eax, byte [r13 + ENT_FACING_OFFSET]
 	cmp eax, FACE_DOWN
 	je .pp_down
 	cmp eax, FACE_UP
@@ -671,45 +894,56 @@ draw_player:
 	cmp eax, FACE_LEFT
 	je .pp_left
 	; right
-	mov r12d, 2
-	add r12d, [player_anim_phase]
-	mov r13d, 1
+	add r12d, 2
+	movzx edx, byte [r13 + ENT_PHASE_OFFSET]
+	add r12d, edx
+	mov ecx, 1
 	jmp .pose_done
 .pp_left:
-	mov r12d, 2
-	add r12d, [player_anim_phase]
+	add r12d, 2
+	movzx edx, byte [r13 + ENT_PHASE_OFFSET]
+	add r12d, edx
+	xor ecx, ecx
 	jmp .pose_done
 .pp_down:
-	mov r13d, [player_anim_phase]
+	; base+0, flip on phase 1
+	movzx ecx, byte [r13 + ENT_PHASE_OFFSET]
 	jmp .pose_done
 .pp_up:
-	mov r12d, 1
-	mov r13d, [player_anim_phase]
+	add r12d, 1
+	movzx ecx, byte [r13 + ENT_PHASE_OFFSET]
 .pose_done:
 
-	; dst_x = player_x - SPRITE_SIZE/2 (player_x is sprite centre)
-	mov ebx, [player_x]
-	sub ebx, SPRITE_SIZE/2
+	; now blit! r12d already holds slot, ecx holds flip
+	; we use callee-saved regs to hold dst_x, dst_y
 
-	; dst_y = player_y - SPRITE_SIZE/2 (in eax for the push)
-	mov eax, [player_y]
+	push rcx					; flip onto stack briefly
+	mov eax, [r13 + ENT_X_OFFSET]
+	sub eax, [camera_x]
 	sub eax, SPRITE_SIZE/2
+	mov ebx, eax				; ebx = dst_x
 
-	; --- push stack args for blit_texture_rect_keyed ---
-	; layout the blit expects (relative to its rbp):
-	;   [rbp+16] = dst_y, [rbp+24] = flip, [rbp+32] = key
-	; push rtl: key, flip, dst_y
-	; 3 pushes = 24 bytes:  16-aligned coming in (caller convention),
-	; so add an 8-byte pad first to land 16-aligned at the call
+	mov eax, [r13 + ENT_Y_OFFSET]
+	sub eax, [camera_y]
+	sub eax, SPRITE_SIZE/2
+	; dst_y goes straight into a stack slot below
+
+	; build call args. blit_texture_rect_keyed signature:
+	; rdi=tex, esi=src_x, edx=src_y, ecx=src_w, r8d=src_h, r9d=dst_x
+	;[rbp+16]=dst_y,[rbp+24]=flip,[rbp+32]=key-> push key/flip/dst_y
+	pop rdi			; dil = flip we saved
+	movzx edi, dil	; clean upper bits
+
+	; push args right-to-left: key first
+	; we need 16-byte rsp alignment at the call: 3 pushes = 24 bytes
+	; would leave us misaligned,so drop an extra 8 bytes first
 	sub rsp, 8					; alignment pad
 	mov rcx, SPRITE_COLOR_KEY
 	push rcx					; key
-	movsxd rdx, r13d
-	push rdx					; flip
-	cdqe						; dst_y currently in eax; sign-extend
+	push rdi					; flip
+	cdqe			; dst_y is in eax; sign-extend to rax for push
 	push rax					; dst_y
 
-	; register args
 	lea rdi, [sprites_tex]
 	mov esi, r12d
 	imul esi, SPRITE_SIZE		; src_x
@@ -721,10 +955,15 @@ draw_player:
 	call blit_texture_rect_keyed
 	add rsp, 32					; 24 args + 8 pad
 
+.skip:
+	inc r15d
+	jmp .next
+.done:
 	add rsp, 8
+	pop r15
+	pop r14
 	pop r13
 	pop r12
 	pop rbx
 	pop rbp
 	ret
-

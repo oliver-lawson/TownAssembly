@@ -86,7 +86,9 @@ blit_texture_rect:
 	mov eax, [rbp-20]		; dst_x
 	test eax, eax
 	jns .no_clip_left
-	add [rbp-4], eax		; src_x += dst_x (negative, shifts right)
+	;add [rbp-4], eax		; src_x += dst_x (negative, shifts right)
+	; ^bug! oops, never caused a crash bc we didn't have cameras
+	sub [rbp-4], eax ; src_x -= dst_x (dst_x is -ve, so src_x grows)
 	add [rbp-12], eax		; src_w += dst_x (shrinks width)
 	mov dword [rbp-20], 0	; dst_x = 0
 .no_clip_left:
@@ -94,7 +96,7 @@ blit_texture_rect:
 	mov eax, [rbp-24]		; dst_y
 	test eax, eax
 	jns .no_clip_top
-	add [rbp-8], eax		; src_y += dst_y
+	sub [rbp-8], eax		; src_y -= dst_y
 	add [rbp-16], eax		; src_h += dst_y
 	mov dword [rbp-24], 0
 .no_clip_top:
