@@ -16,11 +16,13 @@
 %define MAP_WIDTH 80	; 80*16 = 1280 px wide, 2x WINDOW_W
 %define MAP_HEIGHT 60	; 60*16 = 960 px tall,  2x WINDOW_H
 
-; tile IDs, matching the tiles.ppm atlsa
+; tile IDs, matching the tiles.ppm atlas
 %define TILE_GRASS	0
 %define TILE_WATER	1
 %define TILE_STONE	2
 %define TILE_DIRT	3
+%define TILE_TREE	4
+%define ATLAS_TREE	8
 
 
 ; atlas slot ids - the column index into atlas.ppm
@@ -45,6 +47,7 @@ section .data
 		db 50		; water - slow
 		db 0		; stone - blocked
 		db 100		; dirt
+		db 0		; tree  - blocked
 
 	; tile_id -> base atlas slot. multi-variant tiles (grass, water)
 	; resolve to a specific slot in draw_tilemap,
@@ -54,6 +57,7 @@ section .data
 		db ATLAS_WATER_BASE	; water
 		db ATLAS_STONE		; stone
 		db ATLAS_DIRT		; dirt
+		db ATLAS_TREE		; tree
 
 
 section .bss

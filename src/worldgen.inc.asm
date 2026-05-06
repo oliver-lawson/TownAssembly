@@ -117,16 +117,27 @@ generate_world:
 	cmp eax, CA_WALL
 	je .paint_wall
 
-	; floor cell: 15% chance of dirt, otherwise grass
-	mov edi, 15
+	; floor cell: 10% chance of tree/dirt, otherwise grass
+	mov edi, 10
 	call rng_percent
 	test eax, eax
 	jz .paint_grass
+	; % chance of trees vs dirt
+	mov edi, 20
+	call rng_percent
+	test eax, eax
+	jz .paint_dirt
+	mov al, TILE_TREE
+	jmp .paint_write
+
+.paint_dirt:
 	mov al, TILE_DIRT
 	jmp .paint_write
+
 .paint_grass:
 	mov al, TILE_GRASS
 	jmp .paint_write
+
 .paint_wall:
 	mov al, TILE_STONE
 .paint_write:
