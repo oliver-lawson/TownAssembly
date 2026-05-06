@@ -150,7 +150,7 @@ generate_world:
 	cmp r14d, MAP_WIDTH-1
 	jge .water_next_y
 	; % of tiles to consider
-	mov edi, 20
+	mov edi, 5
 	call rng_percent
 	test eax, eax
 	jz .water_next
