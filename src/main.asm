@@ -71,6 +71,7 @@ section .bss ; uninitialised buffers
 	key_toggle_pressed	resb 1
 	key_iterateworld_pressed	resb 1
 	key_restart_pressed	resb 1
+	key_action_pressed	resb 1
 
 	; player state - source of truth TODO: extract for collision etc
 	alignb 4
@@ -80,6 +81,7 @@ section .bss ; uninitialised buffers
 	player_anim_phase	resd 1 ; 0 or 1 - which walk frame atm
 	player_anim_timer	resd 1 ; counts up to ANIM_PERIOD
 	player_moved		resb 1 ; did we move this frame?
+	; something like player_placing/interacting?
 
 	; stats + inventory used by the HUD bar. words for now (max ~65k)
 	; reset to defaults in setup_world_entities so F5 clears them too
@@ -277,6 +279,13 @@ main: ; stack alignment:
 	call debug_log
 
 .no_toggle:
+	; -- E -- edge-triggered action on tile in front of player
+	cmp byte [key_action_pressed], 0
+	je .no_action
+	mov byte [key_action_pressed], 0
+	call try_player_action
+
+.no_action:
 	; --- player movement ---
 	call update_player_input
 
@@ -292,6 +301,9 @@ main: ; stack alignment:
 
 	; advance the tile-animation tick
 	inc dword [tile_anim_ticks]
+
+	; tick the floating text overlay (fade/lift)
+	call floattext_tick
 
 	; centre camera on player, clamped to world bounds
 	call camera_update
@@ -333,6 +345,9 @@ main: ; stack alignment:
 
 	; entities (player + NPCs, y-sorted)
 	call draw_entities
+
+	; floating action text ("+1 wood" etc)
+	call floattext_draw
 
 	; bottom HUD bar
 	call draw_hud_bar
@@ -533,6 +548,8 @@ process_sdl_events:
 	je .key_f4
 	cmp eax, SCANCODE_F5
 	je .key_f5
+	cmp eax, SCANCODE_E
+	je .key_e
 	jmp .poll
 
 .key_escape:
@@ -546,6 +563,9 @@ process_sdl_events:
 	jmp .poll
 .key_f5:
 	mov byte [key_restart_pressed], 1
+	jmp .poll
+.key_e:
+	mov byte [key_action_pressed], 1
 	jmp .poll
 
 .done:
@@ -754,6 +774,284 @@ try_move:
 	pop rbx
 	pop rbp
 	ret
+;================================================================
+; player action (E key): act on the tile in front of player
+;----------------------------------------------------------------
+; alive npcs?: kill	  and give +1 gold
+; tree/bush ?: remove and give +1 wood
+; stone wall?: remove and give +1 stone
+; else silent miss
+;
+; + fading hover text
+;================================================================
+try_player_action:
+	push rbx
+	push r12
+	push r13
+	push r14
+	push r15
+	; 5 callee-saves + ret = 48 bytes -> 16-aligned(!)
+
+	; --- compute target tile (tx, ty) ---
+	; player_x/y are pixel-centred on the player
+	; div by TILE_SIZE to get current tile, then offset by facing
+	mov eax, [player_x]
+	mov ecx, TILE_SIZE
+	cdq
+	idiv ecx
+	mov ebx, eax			; ebx = player_tx
+	mov eax, [player_y]
+	cdq
+	idiv ecx
+	mov r12d, eax			; r12d = player_ty
+
+	mov eax, [player_facing]
+	cmp eax, FACE_UP
+	je .face_up
+	cmp eax, FACE_LEFT
+	je .face_left
+	cmp eax, FACE_RIGHT
+	je .face_right
+	; default down
+	inc r12d
+	jmp .have_target
+.face_up:
+	dec r12d
+	jmp .have_target
+.face_left:
+	dec ebx
+	jmp .have_target
+.face_right:
+	inc ebx
+.have_target:
+	; ebx = target_tx, r12d = target_ty
+
+	; bounds check - bail if outside the map!
+	test ebx, ebx
+	js .out
+	cmp ebx, MAP_WIDTH
+	jge .out
+	test r12d, r12d
+	js .out
+	cmp r12d, MAP_HEIGHT
+	jge .out
+
+	; --- look for npc entity in that tile ---
+	; scan all alive non-player entities; first whose centre lies in
+	; the target tile wins! tile bounds in pixels:
+	;	x0 = tx*16, x1 = x0+16
+	;	y0 = ty*16, y1 = y0+16
+	; r15d = loop counter (callee-saved so it survives entity_ptr)
+	mov r13d, ebx
+	imul r13d, TILE_SIZE		; r13d = x0
+	mov r14d, r12d
+	imul r14d, TILE_SIZE		; r14d = y0
+
+	xor r15d, r15d				; entity index
+.scan:
+	cmp r15d, [entity_count]
+	jge .no_entity_hit
+
+	mov edi, r15d
+	call entity_ptr 			; rax = entity ptr
+
+	; alive?
+	movzx ecx, byte [rax + ENT_FLAGS_OFFSET]
+	test ecx, ENT_FLAG_ALIVE
+	jz .next_scan
+	; non-player?
+	movzx ecx, byte [rax + ENT_TYPE_OFFSET]
+	cmp ecx, ENT_TYPE_PLAYER
+	je .next_scan
+
+	; tile-bounds test on the entity's centre
+	mov ecx, [rax + ENT_X_OFFSET]
+	cmp ecx, r13d
+	jl .next_scan
+	mov edi, r13d
+	add edi, TILE_SIZE
+	cmp ecx, edi
+	jge .next_scan
+	mov ecx, [rax + ENT_Y_OFFSET]
+	cmp ecx, r14d
+	jl .next_scan
+	mov edi, r14d
+	add edi, TILE_SIZE
+	cmp ecx, edi
+	jge .next_scan
+
+	; hit! kill the entity (index in r15d) and grant +1 gold
+	; TMP while there's no hp,damage etc, just a test
+	mov edi, r15d
+	call entity_kill
+	inc word [player_res_gold]
+	lea rdi, [floattext_gold]
+	call spawn_floattext
+	jmp .out
+
+.next_scan:
+	inc r15d
+	jmp .scan
+
+.no_entity_hit:
+	; --- no entity; check tile contents ---
+	mov edi, ebx
+	mov esi, r12d
+	call tile_at
+	; eax = tile id
+
+	cmp eax, TILE_TREE
+	je .got_tree
+	cmp eax, TILE_STONE
+	je .got_stone
+	jmp .out
+
+.got_tree:
+	; replace tile with grass
+	mov eax, r12d
+	imul eax, MAP_WIDTH
+	add eax, ebx
+	lea rcx, [tilemap]
+	mov byte [rcx + rax], TILE_GRASS
+	inc word [player_res_wood]
+	lea rdi, [floattext_wood]
+	call spawn_floattext
+	jmp .out
+
+.got_stone:
+	mov eax, r12d
+	imul eax, MAP_WIDTH
+	add eax, ebx
+	lea rcx, [tilemap]
+	mov byte [rcx + rax], TILE_DIRT
+	inc word [player_res_stone]
+	lea rdi, [floattext_stone]
+	call spawn_floattext
+
+.out:
+	pop r15
+	pop r14
+	pop r13
+	pop r12
+	pop rbx
+	ret
+
+;================================================================
+; floating text: "+1 wood" etc. above the player.
+;----------------------------------------------------------------
+; 1 slot total, new spawns replace old. lives FT_LIFETIME ticks
+; lifts upwards by 1px every FT_LIFT_PERIOD ticks, linear "fade"
+;================================================================
+%define FT_LIFETIME		50
+%define FT_LIFT_PERIOD	6
+%define FT_MAX_TEXT		16
+
+; spawn_floattext: copy a string into the slot, mark it active, place
+; above the player.
+; in: rdi = src null-terminated string ptr
+spawn_floattext:
+	; rdi = src (string ptr).  no calls inside, so no need to save it
+	; position the text above the player's head
+	mov eax, [player_x]
+	mov [floattext_x], eax
+	mov eax, [player_y]
+	sub eax, 16 ; a tile above
+	mov [floattext_y], eax
+	mov word [floattext_ttl], FT_LIFETIME
+	mov byte [floattext_active], 1
+	; copy string into the buffer (up to FT_MAX_TEXT-1 bytes + null)
+	mov rsi, rdi
+	lea rdi, [floattext_buf]
+	mov ecx, FT_MAX_TEXT - 1
+.cp:
+	test ecx, ecx
+	jz .cp_done
+	movzx eax, byte [rsi]
+	mov [rdi], al
+	test al, al
+	jz .cp_done
+	inc rsi
+	inc rdi
+	dec ecx
+	jmp .cp
+.cp_done:
+	mov byte [rdi], 0
+	ret
+
+; floattext_tick: bookkeeping each frame: ttl--, lift y, expire
+floattext_tick:
+	cmp byte [floattext_active], 0
+	je .out
+	movzx eax, word [floattext_ttl]
+	test eax, eax
+	jz .expire
+	dec eax
+	mov word [floattext_ttl], ax
+	; lift 1[x] per FT_LIFT_PERIOD ticks
+	xor edx, edx
+	mov ecx, FT_LIFT_PERIOD
+	div ecx
+	test edx, edx
+	jnz .out
+	dec dword [floattext_y]
+	ret
+.expire:
+	mov byte [floattext_active], 0
+.out:
+	ret
+
+; floattext_draw: render the string at camera (x,y)
+; happens after the entities so it sits in front of everything
+; fades to black atm
+floattext_draw:
+	cmp byte [floattext_active], 0
+	je .out
+
+	; intensity = ttl * 255 / FT_LIFETIME, 0..255
+	movzx eax, word [floattext_ttl]
+	imul eax, 255
+	mov ecx, FT_LIFETIME
+	xor edx, edx
+	div ecx
+	; eax = 0..255, modulate r,g,b channels of white by this:
+	; feels a bit hacky, TEMP until i figure out how to blit alphas
+	mov ecx, eax
+	mov edx, eax
+	shl edx, 8
+	or ecx, edx
+	mov edx, eax
+	shl edx, 16
+	or ecx, edx
+	or ecx, 0xFF343434
+	mov r9d, ecx	; r9d = colour
+
+	; world -> screen
+	mov edi, [floattext_x]
+	sub edi, [camera_x]
+	; nudge left a bit
+	sub edi, 24 ; mb 14 is better?  this feels ok
+	mov esi, [floattext_y]
+	sub esi, [camera_y]
+	mov edx, r9d
+	lea rcx, [floattext_buf]
+	call debug_print
+.out:
+	ret
+
+section .data
+	floattext_wood    db "+1 wood", 0
+	floattext_stone   db "+1 stone", 0
+	floattext_gold    db "+1 gold", 0
+
+section .bss
+	alignb 4
+	floattext_active  resb 1
+	floattext_ttl     resw 1
+	floattext_x       resd 1
+	floattext_y       resd 1
+	floattext_buf     resb FT_MAX_TEXT
+
+section .text
 
 ;================================================================
 ; place_player_on_floor: random non-stone tile
