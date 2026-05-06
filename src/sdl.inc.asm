@@ -23,6 +23,10 @@ extern SDL_GetError
 extern SDL_GetTicks
 extern SDL_SetWindowSize
 extern SDL_RenderSetLogicalSize
+extern SDL_GetKeyboardState
+extern SDL_StartTextInput
+extern SDL_StopTextInput
+extern SDL_GetMouseState
 
 
 ; sdl constants we need (from sdl headers, computed at runtime there)
@@ -50,6 +54,15 @@ extern SDL_RenderSetLogicalSize
 ; named SDL_QUIT, SDL_KEYDOWN there as the structs are SDL_QuitEvent, etc
 %define SDL_QUIT_EVENT		0x100
 %define SDL_KEYDOWN_EVENT	0x300
+%define SDL_TEXTINPUT_EVENT 0x303
+%define SDL_MOUSEBUTTONDOWN 0x401
+%define SDL_MOUSEBUTTONUP   0x402
+
+; SDL_GetMouseState returns button mask, these are the bit positions
+%define SDL_BUTTON_LEFT		1
+%define SDL_BUTTON_RIGHT	3
+%define SDL_BUTTON_LMASK	(1 << (SDL_BUTTON_LEFT - 1))
+%define SDL_BUTTON_RMASK	(1 << (SDL_BUTTON_RIGHT - 1))
 
 ; scancodes
 ; https://github.com/libsdl-org/SDL/blob/SDL2/include/SDL_scancode.h
@@ -62,12 +75,17 @@ extern SDL_RenderSetLogicalSize
 %define SCANCODE_F3  		60
 %define SCANCODE_F4  		61
 %define SCANCODE_F5  		62
+%define SCANCODE_BACKTICK	53
+%define SCANCODE_RETURN		40
+%define SCANCODE_BACKSPACE	42
 
 ; SDL_Event layout (we only care about the bits we use)
-;   offset 0:  Uint32 type
-;   offset 16: SDL_Scancode scancode (Uint32, in keysym)
+;	offset 0:  Uint32 type
+;	offset 12: char text[32] (for SDL_TextInputEvent)
+;	offset 16: SDL_Scancode scancode (Uint32, in keysym)
 ; total size 56 bytes. we'll allocate 64 for alignment safety.
 %define SDL_EVENT_TYPE_OFF		0
+%define SDL_EVENT_TEXT_OFF		12
 %define SDL_EVENT_SCANCODE_OFF	16
 %define SDL_EVENT_SIZE			64
 

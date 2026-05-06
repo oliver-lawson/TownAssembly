@@ -56,6 +56,10 @@ plot_pixel:
 ;================================================================
 ; fill_rect: paint a solid-colour rectangle into the framebuffer
 ; clips against the fb bounds so off-screen rects are safe
+; now with alpha! if not 0xFF, don't use the fast rep stosd path,
+; instead bleand existing fb conents using (fg*a+bg*(255-1))>>8
+; (per channel) sadly we step away from our fake palletisation
+; of art assets here, TODO this needs more thought..
 ;---------------------------------------------------------------- 
 ; in:  edi=x, esi=y, edx=w, ecx=h, r8d=ARGB colour
 ;================================================================
@@ -64,6 +68,7 @@ fill_rect:
 	push r12
 	push r13
 	push r14
+	push r15
 
 	; --- clip ---
 	; if x < 0: w += x; x = 0
@@ -109,16 +114,106 @@ fill_rect:
 	add eax, edi
 	lea r14, [framebuffer]
 	lea r14, [r14 + rax*4]
-	mov ebx, ecx			; h
-.row:
+	mov ebx, ecx			; rows remaining
+	; alpha branch: 0xFF -> fast opaque path
+	mov eax, r13d
+	shr eax, 24
+	cmp eax, 0xFF
+	jne .blend_setup
+
+.row_opaque:
 	mov rdi, r14
 	mov ecx, r12d			; per-row pixel count
 	mov eax, r13d
 	rep stosd
 	add r14, FB_PITCH		; advance to next row
 	dec ebx
-	jnz .row
+	jnz .row_opaque
+	jmp .out
+
+	; --- blended path ---
+	; pre-compute src_*_pma = src_channel * alpha (one-time per call)
+	; and stash them + inv_a on the stack
+	; stack layout (relative to rbp):
+	;	[rbp-4]  src_r_pma
+	;	[rbp-8]  src_g_pma
+	;	[rbp-12] src_b_pma
+	;	[rbp-16] inv_a
+.blend_setup:
+	push rbp
+	mov rbp, rsp
+	sub rsp, 32			; 16-aligned: 5 callee + 1 rbp + 32 = 80
+
+	mov eax, r13d
+	shr eax, 24			; alpha
+	mov r15d, eax		; r15 = a
+	mov r9d, 255
+	sub r9d, r15d		; r9 = inv_a
+	mov [rbp-16], r9d
+
+	mov eax, r13d
+	shr eax, 16
+	and eax, 0xFF
+	imul eax, r15d
+	mov [rbp-4], eax
+
+	mov eax, r13d
+	shr eax, 8
+	and eax, 0xFF
+	imul eax, r15d
+	mov [rbp-8], eax
+
+	mov eax, r13d
+	and eax, 0xFF
+	imul eax, r15d
+	mov [rbp-12], eax
+
+.row_blend:
+	mov rdi, r14
+	mov ecx, r12d
+.pix:
+	mov edx, [rdi]		; edx = bg pixel argb
+	; out_r
+	mov eax, edx
+	shr eax, 16
+	and eax, 0xFF
+	imul eax, [rbp-16]	; bg_r * inv_a
+	add eax, [rbp-4]	; + src_r_pma
+	shr eax, 8			; >> 8
+	; place out_r in bits 16..23 of r10
+	shl eax, 16
+	mov r10d, eax
+	; out_g
+	mov eax, edx
+	shr eax, 8
+	and eax, 0xFF
+	imul eax, [rbp-16]
+	add eax, [rbp-8]
+	shr eax, 8
+	shl eax, 8
+	or r10d, eax
+	; out_b
+	mov eax, edx
+	and eax, 0xFF
+	imul eax, [rbp-16]
+	add eax, [rbp-12]
+	shr eax, 8
+	or r10d, eax
+	; opaque alpha
+	or r10d, 0xFF000000
+	mov [rdi], r10d
+	add rdi, 4
+	dec ecx
+	jnz .pix
+	add r14, FB_PITCH
+	dec ebx
+	jnz .row_blend
+
+	mov rsp, rbp
+	pop rbp
+
 .out:
+	pop r15
 	pop r14
 	pop r13
 	pop r12
@@ -126,3 +221,4 @@ fill_rect:
 	ret
 
 %endif
+

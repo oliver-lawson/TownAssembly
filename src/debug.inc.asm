@@ -47,6 +47,10 @@ section .data
 	; visibility flag - F3 to toggle
 	debug_hud_enabled	db 1
 
+	; default colour for debug_log lines
+	; debug_log_col can override
+	%define LOG_COLOR_DEFAULT 0xFFACACAC
+
 section .bss
 	alignb 8
 	int_buf		resb 16		; scratch for int->ascii
@@ -54,6 +58,10 @@ section .bss
 	log_buffer	resb LOG_LINES * LOG_LINE_LENGTH
 	log_head	resd 1		; next slot to write (0..LOG_LINES-1)
 	log_count	resd 1		; how many slots populated (0..LOG_LINES)
+	; parallel colours for each ring slot (ARGB). written alongside
+	; the line so console_draw can pick them up
+	alignb 4
+	log_colors	resd LOG_LINES
 
 section .text
 ;================================================================
@@ -403,15 +411,32 @@ strlen_simple:
 ; 1. copies the str into next ring buffer slot
 ; 2. truncates to LOG_LINE_LENGTH-1
 ; 3. advances ring head & bumps count (capped to LOG_LINES)
+; 4. records LOG_COLOR_DEFAULT in the parallel colours array
 ;----------------------------------------------------------------
 ;  in:	rdi = null-terminated string ptr
 ;================================================================
 debug_log:
+	mov esi, LOG_COLOR_DEFAULT
+	; fall through into debug_log_col
+
+;================================================================
+; debug_log_col: like debug_log but with a custom ARGB colour
+; recorded in log_colors so console_draw renders it tinted
+;----------------------------------------------------------------
+; in: rdi = null-terminated string, esi = ARGB colour
+;================================================================
+debug_log_col:
 	push rbx
 	push r12
+	push r13	; just pushing for stack alignment
+	push rdi	; preserve original message ptr for status_set
+
+	; record the colour for this slot (log_colors[log_head] = esi)
+	mov eax, [log_head]
+	lea rcx, [log_colors]
+	mov [rcx + rax*4], esi
 
 	; dest = log_buffer + log_head * LOG_LINE_LENGTH
-	mov eax, [log_head]
 	mov ecx, LOG_LINE_LENGTH
 	mul ecx
 	lea rbx, [log_buffer]
@@ -451,6 +476,10 @@ debug_log:
 	inc eax
 	mov [log_count], eax
 .count_capped: ;end
+	; pulse the status fader with the same line so it appears at top
+	pop rdi
+	call status_set
+	pop r13
 	pop r12
 	pop rbx
 	ret
@@ -510,75 +539,7 @@ debug_log_label_int:
 	leave
 	ret
 
-;================================================================
-; debug_render_log: draw log lines @ bottom of scren
-;----------------------------------------------------------------
-; renders oldest at top like a console...TODO: make
-; oldest should be @ [(head - count + LOG_LINES) % LOG_LINES)]
-; iterating count forward till newest
-;================================================================
-debug_render_log:
-	push rbx
-	push r12
-	push r13
-	push r14
-	push r15
-
-	mov r12d, [log_count]
-	test r12d, r12d
-	jz .done				; nothing logged yet
-
-	; compute the index of the oldest visible slot
-	; first_slot = (head - count + LOG_LINES) % LOG_LINES
-	mov eax, [log_head]
-	sub eax, r12d
-	add eax, LOG_LINES
-	xor edx, edx
-	mov ecx, LOG_LINES
-	div ecx					; edx = first slot index
-	mov r13d, edx			; r13 = current slot
-
-	; y pos: glyph-h's above the bottom for now
-	mov r14d, WINDOW_H - DEBUG_GLYPH_H * LOG_LINES - 16
-	mov r15d, r12d			; lines remaining
-.line:
-	test r15d, r15d
-	jz .done
-
-	; line ptr = log_buffer + slot * LOG_LINE_LENGTH
-	mov eax, r13d
-	mov ecx, LOG_LINE_LENGTH
-	mul ecx
-	lea rbx, [log_buffer]
-	add rbx, rax
-
-	; print the text
-	mov edi, 4				; x = 4, small left margin
-	mov esi, r14d
-	mov edx, 0xFFFFFFFF		; font colour
-	mov rcx, rbx
-	call debug_print
-
-	add r14d, DEBUG_GLYPH_H	; advance y down one line
-
-	; advance slot, wrapping
-	inc r13d
-	cmp r13d, LOG_LINES
-	jl .no_wrap
-	xor r13d, r13d
-.no_wrap:
-	dec r15d
-	jmp .line
-
-.done:
-	pop r15
-	pop r14
-	pop r13
-	pop r12
-	pop rbx
-	ret
-
-; -------------------------- Utilities -------------------------------
+;-------------------------- Utilities -------------------------------
 
 ;================================================================
 ; debug_toggle: flip HUD visibility flag
@@ -591,6 +552,7 @@ debug_toggle:
 
 ;================================================================
 ; is_debug_hud_enabled: visible?
+;----------------------------------------------------------------
 ; out: eax = 1 if enabled, else 0
 ;================================================================
 is_debug_hud_enabled:

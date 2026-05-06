@@ -12,6 +12,7 @@ default rel
 %include "entity_player.inc.asm"
 %include "debug.inc.asm"
 %include "hud.inc.asm"
+%include "console.inc.asm"
 
 section .data
 	window_title		db "Town Assembly", 0
@@ -42,19 +43,13 @@ section .data
 	hud_label_fps		db "fps", 0
 	hud_label_iters		db "iters", 0
 	hud_label_seed		db "seed", 0
-	hud_help			db "F3 hud  F5 restart  ESC quit", 0
+	hud_help			db "` console F3 hud  F5 restart", 0
 
 	; log messages
 	log_msg_started		db 0x1, " world generated! ", 0x3, 0
 	log_msg_restart		db "regenerated world", 0
 	log_msg_itered		db "iterated cellular automata", 0
 	log_msg_hud_toggles	db "hud toggled", 0
-
-; SDL_GetKeyboardState
-; returns ptr to a uint8[] indexed by scancode
-; ptr is stable, so we're caching it once after SDL_Init
-; into the sdl_keystate below
-extern SDL_GetKeyboardState
 
 section .bss ; uninitialised buffers
 	alignb 8
@@ -253,21 +248,7 @@ main: ; stack alignment:
 	cmp byte [key_restart_pressed], 0
 	je .no_restart
 	mov byte [key_restart_pressed], 0
-	; restart pressed
-	;call rng_seed_from_time
-	call reset_world_iterations
-	call rng_next
-	mov eax, [rng_state]
-	mov [current_seed], eax
-	call generate_world
-	call entity_clear_all
-	; re-init player
-	call place_player_on_floor
-	mov byte  [player_moved], 0
-	; + reset NPCs
-	call setup_world_entities
-	lea rdi, [log_msg_restart]
-	call debug_log
+	call restart_world
 
 .no_restart:
 	; F3: toggle HUD
@@ -304,6 +285,9 @@ main: ; stack alignment:
 
 	; tick the floating text overlay (fade/lift)
 	call floattext_tick
+
+	; tick the status line fade
+	call status_tick
 
 	; centre camera on player, clamped to world bounds
 	call camera_update
@@ -352,22 +336,30 @@ main: ; stack alignment:
 	; bottom HUD bar
 	call draw_hud_bar
 
-	; ------ draw debug hud (if enabled) ------
+	; top-of-screen status line - always-on, fades out.
+	; (skipped internally if the console is open.)
+	call status_draw
+	; console panel last so it covers everything when open.
+	call console_draw
+
+	; --- draw debug hud (if enabled & console isn't covering it) ---
+	cmp byte [console_open], 0
+	jne .skip_hud_draw
 	call is_debug_hud_enabled
 	test eax, eax
 	jz .skip_hud_draw
 
 	;top row: fps counter
 	mov edi, 4 ; x
-	mov esi, 4 ; y
-	mov edx, 0xFF004400 ; some green, would be cool to speed-tint
+	mov esi, 14 ; y
+	mov edx, 0xFFCCFFCC
 	lea rcx, [hud_label_fps]
 	mov r8d, [current_fps]
 	call debug_print_label_int
 	; iterations
 	add eax, 8 ; bit of a gap between labels
 	mov edi, eax
-	mov esi, 4
+	mov esi, 14
 	mov edx, 0xFF0033AA
 	lea rcx, [hud_label_iters]
 	mov r8d, [ca_iterations_count]
@@ -375,7 +367,7 @@ main: ; stack alignment:
 	; seed
 	add eax, 8 ; bit of a gap between labels
 	mov edi, eax
-	mov esi, 4
+	mov esi, 14
 	mov edx, 0xFF000000
 	lea rcx, [hud_label_seed]
 	mov r8d, [current_seed]
@@ -383,13 +375,11 @@ main: ; stack alignment:
 
 	; second line: help text
 	mov edi, 4
-	mov esi, 14
+	mov esi, 24
 	mov edx, 0xFF000000;
 	lea rcx, [hud_help]
 	call debug_print
 
-	; log lines at the bottom
-	call debug_render_log
 	; -------- end hud (if enabled) -------
 	.skip_hud_draw:
 
@@ -532,16 +522,39 @@ process_sdl_events:
 	je .got_quit
 	cmp eax, SDL_KEYDOWN_EVENT
 	je .got_keydown
+	cmp eax, SDL_TEXTINPUT_EVENT
+	je .got_textinput
 	jmp .poll				; ignore other events
 
 .got_quit:
 	mov byte [key_quit], 1
 	jmp .poll
 
+.got_textinput:
+	; SDL hands us already-shifted UTF-8 in event.text.text. when the
+	; console isn't open this is harmless (handle_text checks first).
+	lea rdi, [event_buf + SDL_EVENT_TEXT_OFF]
+	call console_handle_text
+	jmp .poll
+
 .got_keydown:
 	mov eax, [event_buf + SDL_EVENT_SCANCODE_OFF]
-	cmp eax, SCANCODE_ESCAPE
-	je .key_escape
+	cmp eax, SCANCODE_ESCAPE ;TMP - too easy to press w/ console open
+	je .key_escape			 ;TMP
+	; backtick toggles the console regardless of state, and matches
+	; before anything else so it can close the console mid-typing
+	cmp eax, SCANCODE_BACKTICK
+	je .key_backtick
+	; if console is open, route enter/backspace to it/eat everything
+	; else (so movement/action keys don't fire while typing)
+	cmp byte [console_open], 0
+	je .console_closed_keys
+	cmp eax, SCANCODE_RETURN
+	je .key_return
+	cmp eax, SCANCODE_BACKSPACE
+	je .key_backspace
+	jmp .poll
+.console_closed_keys:
 	cmp eax, SCANCODE_F3
 	je .key_f3
 	cmp eax, SCANCODE_F4
@@ -552,7 +565,7 @@ process_sdl_events:
 	je .key_e
 	jmp .poll
 
-.key_escape:
+.key_escape: ; TMP - too easy to press when console open
 	mov byte [key_quit], 1
 	jmp .poll
 .key_f3:
@@ -566,6 +579,15 @@ process_sdl_events:
 	jmp .poll
 .key_e:
 	mov byte [key_action_pressed], 1
+	jmp .poll
+.key_backtick:
+	call console_toggle
+	jmp .poll
+.key_return:
+	call console_submit
+	jmp .poll
+.key_backspace:
+	call console_backspace
 	jmp .poll
 
 .done:
@@ -657,6 +679,10 @@ update_player_input:
 
 	mov byte [player_moved], 0
 
+	; early return if console open
+	cmp byte [console_open], 0
+	jne .skip_movement
+
 	; -- left? --
 	mov rax, [sdl_keystate]
 	movzx ecx, byte [rax + SCANCODE_LEFT]
@@ -697,6 +723,7 @@ update_player_input:
 	mov esi, move_step
 	call try_move
 .not_down:
+.skip_movement:
 
 	; --- animation ---
 	; if moved this frame?: tick the timer, toggle phase on overflow
@@ -1039,19 +1066,46 @@ floattext_draw:
 	ret
 
 section .data
-	floattext_wood    db "+1 wood", 0
-	floattext_stone   db "+1 stone", 0
-	floattext_gold    db "+1 gold", 0
+	floattext_wood		db "+1 wood", 0
+	floattext_stone		db "+1 stone", 0
+	floattext_gold		db "+1 gold", 0
 
 section .bss
 	alignb 4
-	floattext_active  resb 1
-	floattext_ttl     resw 1
-	floattext_x       resd 1
-	floattext_y       resd 1
-	floattext_buf     resb FT_MAX_TEXT
+	floattext_active	resb 1
+	floattext_ttl		resw 1
+	floattext_x			resd 1
+	floattext_y			resd 1
+	floattext_buf		resb FT_MAX_TEXT
 
 section .text
+
+;================================================================
+; restart_world: regenerate the world + reset player/entities
+;----------------------------------------------------------------
+; called from the F5 path and the /restart console command - so it
+; needs a clean ret/don't fall through into anything else!
+;================================================================
+restart_world:
+	push rbp
+	mov rbp, rsp
+	; restart pressed
+	;call rng_seed_from_time
+	call reset_world_iterations
+	call rng_next
+	mov eax, [rng_state]
+	mov [current_seed], eax
+	call generate_world
+	call entity_clear_all
+	; re-init player
+	call place_player_on_floor
+	mov byte [player_moved], 0
+	; + reset NPCs
+	call setup_world_entities
+	lea rdi, [log_msg_restart]
+	call debug_log
+	pop rbp
+	ret
 
 ;================================================================
 ; place_player_on_floor: random non-stone tile
