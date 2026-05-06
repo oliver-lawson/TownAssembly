@@ -149,12 +149,8 @@ main: ; stack alignment:
 	call generate_world
 	;call init_tilemap_test
 
-	; player start/defaults - centre of map facing down for now
-	mov dword [player_x], WORLD_PIXEL_W / 2
-	mov dword [player_y], WORLD_PIXEL_H / 2
-	mov dword [player_facing], FACE_DOWN
-	mov dword [player_anim_phase], 0
-	mov dword [player_anim_timer], 0
+	; player init
+	call place_player_on_floor
 	mov byte  [player_moved], 0
 
 	; place NPCs
@@ -263,12 +259,8 @@ main: ; stack alignment:
 	mov [current_seed], eax
 	call generate_world
 	call entity_clear_all
-	; place the player at centre again with new sprite defaults
-	mov dword [player_x], WORLD_PIXEL_W / 2
-	mov dword [player_y], WORLD_PIXEL_H / 2
-	mov dword [player_facing], FACE_DOWN
-	mov dword [player_anim_phase], 0
-	mov dword [player_anim_timer], 0
+	; re-init player
+	call place_player_on_floor
 	mov byte  [player_moved], 0
 	; + reset NPCs
 	call setup_world_entities
@@ -761,6 +753,80 @@ try_move:
 	pop r12
 	pop rbx
 	pop rbp
+	ret
+
+;================================================================
+; place_player_on_floor: random non-stone tile
+;================================================================
+place_player_on_floor:
+	push rbx
+	push r12
+	mov r12d, 200
+.try:
+	test r12d, r12d
+	jz .scan
+	dec r12d
+
+	mov edi, MAP_WIDTH
+	call rng_range
+	mov ebx, eax	; tx
+
+	mov edi, MAP_HEIGHT
+	call rng_range
+	mov ecx, eax	; ty
+
+	imul ecx, MAP_WIDTH
+	add ecx, ebx
+	lea rdx, [tilemap]
+	movzx eax, byte [rdx + rcx]
+	; reject tiles < 100% movespeed
+	lea rdx, [tile_speed_table]
+	movzx eax, byte [rdx + rax]
+	cmp eax, 100
+	jne .try
+
+	imul ebx, TILE_SIZE
+	add ebx, TILE_SIZE/2
+	mov [player_x], ebx
+	mov eax, ecx
+	xor edx, edx
+	mov ecx, MAP_WIDTH
+	div ecx
+	imul eax, TILE_SIZE
+	add eax, TILE_SIZE/2
+	mov [player_y], eax
+
+	pop r12
+	pop rbx
+	ret
+
+.scan:
+	xor ecx, ecx
+.scan_loop:
+	cmp ecx, MAP_WIDTH * MAP_HEIGHT
+	jge .scan_fail
+	lea rdx, [tilemap]
+	movzx eax, byte [rdx + rcx]
+	lea rdx, [tile_speed_table]
+	movzx eax, byte [rdx + rax]
+	cmp eax, 100
+	je .scan_found
+	inc ecx
+	jmp .scan_loop
+.scan_found:
+	mov eax, ecx
+	xor edx, edx
+	mov ecx, MAP_WIDTH
+	div ecx
+	imul edx, TILE_SIZE
+	add edx, TILE_SIZE/2
+	mov [player_x], edx
+	imul eax, TILE_SIZE
+	add eax, TILE_SIZE/2
+	mov [player_y], eax
+.scan_fail:
+	pop r12
+	pop rbx
 	ret
 
 ;================================================================
