@@ -11,11 +11,13 @@ default rel
 %include "entity.inc.asm"
 %include "entity_player.inc.asm"
 %include "debug.inc.asm"
+%include "hud.inc.asm"
 
 section .data
 	window_title		db "Town Assembly", 0
 	tile_ppm_file		db "res/tiles.ppm", 0
 	sprites_ppm_file	db "res/sprites.ppm", 0
+	icons_ppm_file		db "res/icons.ppm", 0
 	scale_quality_hint  db "SDL_RENDER_SCALE_QUALITY", 0
 	scale_quality_value db "0", 0 ; "0" = nearest-neighbour
 
@@ -78,6 +80,17 @@ section .bss ; uninitialised buffers
 	player_anim_phase	resd 1 ; 0 or 1 - which walk frame atm
 	player_anim_timer	resd 1 ; counts up to ANIM_PERIOD
 	player_moved		resb 1 ; did we move this frame?
+
+	; stats + inventory used by the HUD bar. words for now (max ~65k)
+	; reset to defaults in setup_world_entities so F5 clears them too
+	alignb 2
+	player_hp			resw 1
+	player_hp_max		resw 1
+	player_res_wood		resw 1
+	player_res_stone	resw 1
+	player_res_food		resw 1
+	player_res_gold		resw 1
+
 	; movement accumulator for fractional-speed tiles:
 	; each move attempt adds the destination tile's speed percent:
 	; when it reaches 100 we apply the step and subtract
@@ -119,6 +132,15 @@ main: ; stack alignment:
 	test eax, eax
 	jnz .fail_ppm
 
+	; load HUD icon sheet - icons.ppm
+	; slots: 0 hp, 1 wood, 2 stone, 3 food, 4 gold
+	; no colour key atm as keeping hud bg solid
+	lea rdi, [icons_tex]
+	lea rsi, [icons_ppm_file]
+	call load_ppm_texture
+	test eax, eax
+	jnz .fail_ppm
+
 	; seed rng and generate world
 	;call rng_seed_from_time
 	mov [rng_state], byte 1
@@ -142,7 +164,7 @@ main: ; stack alignment:
 	call debug_log
 
 	; set video scale
-	mov dword [current_scale], 2
+	mov dword [current_scale], 3
 
 	; SDL hints - must be done before SDL_INIT_VIDEO
 	lea rdi, [scale_quality_hint]
@@ -167,8 +189,8 @@ main: ; stack alignment:
 	lea rdi, [window_title]
 	mov esi, SDL_WINDOWPOS_CENTERED
 	mov edx, SDL_WINDOWPOS_CENTERED
-	mov ecx, WINDOW_W * 2 ; default scale
-	mov r8d, WINDOW_H * 2
+	mov ecx, WINDOW_W * 3 ; default scale
+	mov r8d, WINDOW_H * 3
 	mov r9d, SDL_WINDOW_SHOWN
 	call SDL_CreateWindow
 	test rax, rax
@@ -320,6 +342,9 @@ main: ; stack alignment:
 	; entities (player + NPCs, y-sorted)
 	call draw_entities
 
+	; bottom HUD bar
+	call draw_hud_bar
+
 	; ------ draw debug hud (if enabled) ------
 	call is_debug_hud_enabled
 	test eax, eax
@@ -394,6 +419,8 @@ main: ; stack alignment:
 	call free_texture
 	lea rdi, [sprites_tex]
 	call free_texture
+	lea rdi, [icons_tex]
+	call free_texture
 	mov rdi, [sdl_texture]
 	call SDL_DestroyTexture
 	mov rdi, [sdl_renderer]
@@ -412,6 +439,8 @@ main: ; stack alignment:
 	call free_texture
 	lea rdi, [sprites_tex]
 	call free_texture
+	lea rdi, [icons_tex]
+	call free_texture
 	lea rdi, [err_ppm_msg]
 	call print_error
 	mov eax, 1
@@ -424,6 +453,8 @@ main: ; stack alignment:
 	call free_texture
 	lea rdi, [sprites_tex]
 	call free_texture
+	lea rdi, [icons_tex]
+	call free_texture
 	mov eax, 1 ; exit code
 	leave
 	ret
@@ -433,6 +464,8 @@ main: ; stack alignment:
 	lea rdi, [atlas_tex]
 	call free_texture
 	lea rdi, [sprites_tex]
+	call free_texture
+	lea rdi, [icons_tex]
 	call free_texture
 	call SDL_Quit
 	mov eax, 1
@@ -444,6 +477,8 @@ main: ; stack alignment:
 	lea rdi, [atlas_tex]
 	call free_texture
 	lea rdi, [sprites_tex]
+	call free_texture
+	lea rdi, [icons_tex]
 	call free_texture
 	mov rdi, [sdl_window]
 	call SDL_DestroyWindow
@@ -457,6 +492,8 @@ main: ; stack alignment:
 	lea rdi, [atlas_tex]
 	call free_texture
 	lea rdi, [sprites_tex]
+	call free_texture
+	lea rdi, [icons_tex]
 	call free_texture
 	mov rdi, [sdl_renderer]
 	call SDL_DestroyRenderer
@@ -769,6 +806,14 @@ setup_world_entities:
 	mov dword [player_anim_phase], 0
 	mov dword [player_anim_timer], 0
 	mov dword [move_accum], 0
+
+	; init player stats + inventory
+	mov word [player_hp_max], 10
+	mov word [player_hp], 10
+	mov word [player_res_wood], 3
+	mov word [player_res_stone], 1
+	mov word [player_res_food], 5
+	mov word [player_res_gold], 0
 
 	; ebx = stubs spawned, r12d = attempts so far
 	; attempts are capped just in case

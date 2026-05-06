@@ -24,6 +24,7 @@ section .bss
 	alignb 8  ; tilesheets!
 	atlas_tex		resb TEX_STRUCT_SIZE
 	sprites_tex		resb TEX_STRUCT_SIZE
+	icons_tex		resb TEX_STRUCT_SIZE
 
 section .text
 ;================================================================

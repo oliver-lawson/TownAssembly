@@ -539,7 +539,7 @@ debug_render_log:
 	mov r13d, edx			; r13 = current slot
 
 	; y pos: glyph-h's above the bottom for now
-	mov r14d, WINDOW_H - DEBUG_GLYPH_H * LOG_LINES - 4
+	mov r14d, WINDOW_H - DEBUG_GLYPH_H * LOG_LINES - 16
 	mov r15d, r12d			; lines remaining
 .line:
 	test r15d, r15d
@@ -555,7 +555,7 @@ debug_render_log:
 	; print the text
 	mov edi, 4				; x = 4, small left margin
 	mov esi, r14d
-	mov edx, 0xFF000000		; black
+	mov edx, 0xFFFFFFFF		; font colour
 	mov rcx, rbx
 	call debug_print
 
