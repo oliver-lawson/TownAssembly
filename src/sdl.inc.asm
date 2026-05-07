@@ -70,7 +70,13 @@ extern SDL_GetMouseState
 %define SCANCODE_RIGHT		79
 %define SCANCODE_UP			82
 %define SCANCODE_DOWN		81
+%define SCANCODE_A			4
+%define SCANCODE_D			7
+%define SCANCODE_W			26
+%define SCANCODE_S			22
 %define SCANCODE_E			8
+%define SCANCODE_I			12
+%define SCANCODE_Q			20
 %define SCANCODE_ESCAPE		41
 %define SCANCODE_F3  		60
 %define SCANCODE_F4  		61

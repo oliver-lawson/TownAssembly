@@ -348,9 +348,9 @@ reset_world_iterations:
 ; an attempt:
 ;   - pick a random tile in the map
 ;   - if it's grass AND has at least one adjacent tree (4-neighbour),
-;     replace it with a tree
+;	  replace it with a tree
 ;================================================================
-%define TREE_REGROW_PERIOD 1;60	; frames between attempts
+%define TREE_REGROW_PERIOD 20;60	; frames between attempts
 
 section .data
 	tree_regrow_counter dd 0

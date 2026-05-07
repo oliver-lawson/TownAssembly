@@ -13,6 +13,7 @@ default rel
 %include "debug.inc.asm"
 %include "hud.inc.asm"
 %include "console.inc.asm"
+%include "inventory.inc.asm"
 
 section .data
 	window_title		db "Town Assembly", 0
@@ -43,7 +44,7 @@ section .data
 	hud_label_fps		db "fps", 0
 	hud_label_iters		db "iters", 0
 	hud_label_seed		db "seed", 0
-	hud_help			db "` console F3 hud  F5 restart", 0
+	hud_help			db "` console F3 hud  F5 restart  i inventory", 0
 
 	; log messages
 	log_msg_started		db 0x1, " world generated! ", 0x3, 0
@@ -67,6 +68,9 @@ section .bss ; uninitialised buffers
 	key_iterateworld_pressed	resb 1
 	key_restart_pressed	resb 1
 	key_action_pressed	resb 1
+	key_inv_pressed		resb 1
+	key_close_pressed	resb 1
+
 
 	; player state - source of truth TODO: extract for collision etc
 	alignb 4
@@ -144,14 +148,12 @@ main: ; stack alignment:
 	mov eax, [rng_state]
 	mov [current_seed], eax ; store current seed for HUD
 	call generate_world
-	;call init_tilemap_test
 
 	; player init
 	call place_player_on_floor
 	mov byte  [player_moved], 0
-
-	; place NPCs
-	call setup_world_entities
+	call setup_world_entities ; place NPCs
+	call inv_init ; set up inventory
 
 	lea rdi, [log_msg_started]
 	call debug_log
@@ -231,6 +233,11 @@ main: ; stack alignment:
 	cmp byte [key_quit], 0
 	jne .cleanup
 
+	; mirror OS-level mouse position into our logical pixel coords
+	; once per frame, so any UI code that hit-tests this frame is
+	; consistent
+	call update_mouse_state
+
 	; --- handle one shot keys ---
 
 	; F4: iterate wordlgen CA
@@ -260,13 +267,73 @@ main: ; stack alignment:
 	call debug_log
 
 .no_toggle:
-	; -- E -- edge-triggered action on tile in front of player
+
+	; I toggles the inventory screen
+	;handled before the action key to avoid clash
+	cmp byte [key_inv_pressed], 0
+	je .no_inv
+	mov byte [key_inv_pressed], 0
+	call inv_toggle
+.no_inv:
+
+	; Q closes the inventory if open, else cancels placement mode
+	cmp byte [key_close_pressed], 0
+	je .no_close
+	mov byte [key_close_pressed], 0
+	call inv_is_open
+	test eax, eax
+	jz .close_try_place
+	call inv_toggle 	; close inventory
+	jmp .no_close
+.close_try_place:
+	call place_is_active
+	test eax, eax
+	jz .no_close
+	call place_cancel
+.no_close:
+
+	; E key: gather/kill the tile or mob in front. eaten by inventory
+	; (mouse-driven). also eaten in placement mode - placement is now
+	; mouse-driven too so E shouldn't double up
 	cmp byte [key_action_pressed], 0
 	je .no_action
 	mov byte [key_action_pressed], 0
+	call inv_is_open
+	test eax, eax
+	jnz .no_action
+	call place_is_active
+	test eax, eax
+	jnz .no_action
 	call try_player_action
-
 .no_action:
+
+	; while the inventory screen is up, route mouse clicks to it
+	; the world keeps ticking around the player; just suspend input
+	call inv_is_open
+	test eax, eax
+	jz .no_inv_update
+	call inv_update
+	jmp .skip_place_clicks
+.no_inv_update:
+	; --- placement-mode mouse handling ---
+	; left click: try to place on the tile under the mouse
+	; right click: cancel placement entirely
+	; only consume the click flags if place mode is on - otherwise
+	; the events fall through and... currently nothing else uses them
+	; but leaving them set is harmless
+	call place_is_active
+	test eax, eax
+	jz .skip_place_clicks
+	cmp byte [mouse_l_clicked], 0
+	je .pm_no_left
+	mov byte [mouse_l_clicked], 0
+	call place_at_mouse
+.pm_no_left:
+	cmp byte [mouse_r_clicked], 0
+	je .skip_place_clicks
+	mov byte [mouse_r_clicked], 0
+	call place_cancel
+.skip_place_clicks:
 	; --- player movement ---
 	call update_player_input
 
@@ -291,6 +358,16 @@ main: ; stack alignment:
 
 	; tick the status line fade
 	call status_tick
+
+	; clear any stale mouse-click flags - only consume when the
+	; inventory is open. without this, opening the inv after some
+	; clicks outside it replays them on the first frame
+	call inv_is_open
+	test eax, eax
+	jnz .keep_mouse_flags
+	mov byte [mouse_l_clicked], 0
+	mov byte [mouse_r_clicked], 0
+.keep_mouse_flags:
 
 	; centre camera on player, clamped to world bounds
 	call camera_update
@@ -333,21 +410,38 @@ main: ; stack alignment:
 	; entities (player + NPCs, y-sorted)
 	call draw_entities
 
+	; placement-mode tile outline sits in world space
+	; drawn between entities and HUD
+	call place_draw_cursor
+
 	; floating action text ("+1 wood" etc)
 	call floattext_draw
 
 	; bottom HUD bar
 	call draw_hud_bar
 
-	; top-of-screen status line - always-on, fades out.
-	; (skipped internally if the console is open.)
+	; inventory screen: drawn before console/status so the console can
+	; still pop on top, but after the bottom HUD so it covers it
+	call inv_draw
+
+	; top-of-screen status line - always-on, fades out
+	; (skipped internally if the console is open)
+	; also skipped while inventory is open so the panel reads cleanly
+	call inv_is_open
+	test eax, eax
+	jnz .skip_status_draw
 	call status_draw
-	; console panel last so it covers everything when open.
+.skip_status_draw:
+	; console panel last so it covers everything when open
 	call console_draw
 
 	; --- draw debug hud (if enabled & console isn't covering it) ---
+	; also skipped while inventory is open
 	cmp byte [console_open], 0
 	jne .skip_hud_draw
+	call inv_is_open
+	test eax, eax
+	jnz .skip_hud_draw
 	call is_debug_hud_enabled
 	test eax, eax
 	jz .skip_hud_draw
@@ -527,7 +621,9 @@ process_sdl_events:
 	je .got_keydown
 	cmp eax, SDL_TEXTINPUT_EVENT
 	je .got_textinput
-	jmp .poll				; ignore other events
+	cmp eax, SDL_MOUSEBUTTONDOWN
+	je .got_mousedown
+	jmp .poll
 
 .got_quit:
 	mov byte [key_quit], 1
@@ -566,6 +662,10 @@ process_sdl_events:
 	je .key_f5
 	cmp eax, SCANCODE_E
 	je .key_e
+	cmp eax, SCANCODE_I
+	je .key_i
+	cmp eax, SCANCODE_Q
+	je .key_q
 	jmp .poll
 
 .key_escape: ; TMP - too easy to press when console open
@@ -583,6 +683,12 @@ process_sdl_events:
 .key_e:
 	mov byte [key_action_pressed], 1
 	jmp .poll
+.key_i:
+	mov byte [key_inv_pressed], 1
+	jmp .poll
+.key_q:
+	mov byte [key_close_pressed], 1
+	jmp .poll
 .key_backtick:
 	call console_toggle
 	jmp .poll
@@ -591,6 +697,23 @@ process_sdl_events:
 	jmp .poll
 .key_backspace:
 	call console_backspace
+	jmp .poll
+
+.got_mousedown:
+	; SDL_MouseButtonEvent has  button index at offset 16 (Uint8)
+	; 1=left, 3=right. we ignore middle atm
+	; set the matching one-shot flag for next time inv_update runs
+	movzx eax, byte [event_buf + 16]
+	cmp eax, SDL_BUTTON_LEFT
+	je .mb_left
+	cmp eax, SDL_BUTTON_RIGHT
+	je .mb_right
+	jmp .poll
+.mb_left:
+	mov byte [mouse_l_clicked], 1
+	jmp .poll
+.mb_right:
+	mov byte [mouse_r_clicked], 1
 	jmp .poll
 
 .done:
@@ -682,13 +805,18 @@ update_player_input:
 
 	mov byte [player_moved], 0
 
-	; early return if console open
+	; early return if console/inventory open
 	cmp byte [console_open], 0
 	jne .skip_movement
+	cmp byte [inv_open], 0
+	jne .skip_movement
 
-	; -- left? --
+
+	; -- left? (left arrow or A) --
 	mov rax, [sdl_keystate]
 	movzx ecx, byte [rax + SCANCODE_LEFT]
+	movzx edx, byte [rax + SCANCODE_A]
+	or ecx, edx
 	test ecx, ecx
 	jz .not_left
 	mov dword [player_facing], FACE_LEFT
@@ -696,9 +824,11 @@ update_player_input:
 	xor esi, esi
 	call try_move
 .not_left:
-	; -- right? --
+	; -- right? (right arrow or D) --
 	mov rax, [sdl_keystate]
 	movzx ecx, byte [rax + SCANCODE_RIGHT]
+	movzx edx, byte [rax + SCANCODE_D]
+	or ecx, edx
 	test ecx, ecx
 	jz .not_right
 	mov dword [player_facing], FACE_RIGHT
@@ -706,9 +836,11 @@ update_player_input:
 	xor esi, esi
 	call try_move
 .not_right:
-	; -- up? --
+	; -- up? (up arrow or W) --
 	mov rax, [sdl_keystate]
 	movzx ecx, byte [rax + SCANCODE_UP]
+	movzx edx, byte [rax + SCANCODE_W]
+	or ecx, edx
 	test ecx, ecx
 	jz .not_up
 	mov dword [player_facing], FACE_UP
@@ -716,9 +848,11 @@ update_player_input:
 	mov esi, -move_step
 	call try_move
 .not_up:
-	; -- down? --
+	; -- down? (down arrow or S) --
 	mov rax, [sdl_keystate]
 	movzx ecx, byte [rax + SCANCODE_DOWN]
+	movzx edx, byte [rax + SCANCODE_S]
+	or ecx, edx
 	test ecx, ecx
 	jz .not_down
 	mov dword [player_facing], FACE_DOWN
@@ -1105,8 +1239,47 @@ restart_world:
 	mov byte [player_moved], 0
 	; + reset NPCs
 	call setup_world_entities
+	; full reset wipes crafting grid, placement mode, & crafted-item
+	; counts.  resources get re-init by setup_world_entities
+	call inv_full_reset
 	lea rdi, [log_msg_restart]
 	call debug_log
+	pop rbp
+	ret
+
+
+;================================================================
+; update_mouse_state: cache mouse pos in logical (fb) px this frame
+;----------------------------------------------------------------
+; SDL gives us window-pixel coords, we div by current_scale to get
+; the equivalent fb pixel
+;
+; SDL_GetMouseState(int* x, int* y) returns the button mask in eax.
+; ignoring the return as the event flags give us easier click/hold
+;================================================================
+section .bss
+	alignb 4
+	mouse_win_x	resd 1
+	mouse_win_y	resd 1
+section .text
+
+update_mouse_state:
+	push rbp
+	mov rbp, rsp
+	lea rdi, [mouse_win_x]
+	lea rsi, [mouse_win_y]
+	call SDL_GetMouseState
+	; logical x = window x / scale; same for y
+	; shame we have to do a div, but it's once per frame, not per px,
+	; and better than using an sdl call every frame
+	mov eax, [mouse_win_x]
+	cdq
+	idiv dword [current_scale]
+	mov [mouse_lx], eax
+	mov eax, [mouse_win_y]
+	cdq
+	idiv dword [current_scale]
+	mov [mouse_ly], eax
 	pop rbp
 	ret
 

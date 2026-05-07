@@ -22,17 +22,26 @@
 %define TILE_STONE	2
 %define TILE_DIRT	3
 %define TILE_TREE	4
-%define ATLAS_TREE	8
+%define TILE_WOOD_FLOOR  5
+%define TILE_WOOD_WALL   6
+%define TILE_WOOD_DOOR   7
+%define TILE_COUNT		 8
 
 
-; atlas slot ids - the column index into atlas.ppm
-; decoupled from tile IDs above so atlas can be rearranged/extended
-; for tiles with variants (grass, water) these are the *base* slot
-; and we pick within the "variant" block at draw time
-%define ATLAS_GRASS_BASE	0	; 2 variants: 0..1
-%define ATLAS_WATER_BASE	2	; 4 anim frames: 2..5
+; atlas slots - linear index across atlas.ppm
+; atlas is laid out in ATLAS_COLS columns,
+; slot N is at (N%COLS, N/COLS)*TILE_SIZE pixels)
+; row 0 is terrain, row 1 is built/crafted objects
+%define ATLAS_COLS			9
+
+%define ATLAS_GRASS_BASE	0	; row 0: 2 variants (0..1)
+%define ATLAS_WATER_BASE	2	; row 0: 4 anim frames (2..5)
 %define ATLAS_STONE			6
 %define ATLAS_DIRT			7
+%define ATLAS_TREE			8
+%define ATLAS_WOOD_FLOOR	9	; row 1, col 0
+%define ATLAS_WOOD_WALL		10
+%define ATLAS_WOOD_DOOR		11
 
 %define ATLAS_GRASS_VARIANTS	2
 %define ATLAS_WATER_FRAMES		4
@@ -44,10 +53,14 @@
 section .data
 	tile_speed_table:
 		db 100		; grass
-		db 50		; water - slow
-		db 0		; stone - blocked
+		db 50		; water
+		db 0		; stone
 		db 100		; dirt
-		db 0		; tree  - blocked
+		db 0		; tree
+		db 100		; wood floor
+		db 0		; wood wall
+		db 100		; wood door
+
 
 	; tile_id -> base atlas slot. multi-variant tiles (grass, water)
 	; resolve to a specific slot in draw_tilemap,
@@ -58,6 +71,9 @@ section .data
 		db ATLAS_STONE		; stone
 		db ATLAS_DIRT		; dirt
 		db ATLAS_TREE		; tree
+		db ATLAS_WOOD_FLOOR	; wood floor
+		db ATLAS_WOOD_WALL	; wood wall
+		db ATLAS_WOOD_DOOR	; wood door
 
 
 section .bss
@@ -386,12 +402,21 @@ draw_tilemap:
 .got_atlas_slot:
 
 	; blit_texture_rect signature:
-	;	rdi=tex ptr, esi=src_x, edx=src_y, ecx=src_w,
-	;	r8d=src_h, r9d=dst_x, [stack:dst_y], [stack:flip]
+	;   rdi=tex ptr, esi=src_x, edx=src_y, ecx=src_w,
+	;   r8d=src_h, r9d=dst_x, [stack:dst_y], [stack:flip]
+	;
+	; r13d holds a *linear* atlas slot. row = slot / ATLAS_COLS,
+	; col = slot % ATLAS_COLS. multiply by TILE_SIZE for pixel coords.
 	mov rdi, [rbp-16]
-	mov esi, r13d
-	imul esi, TILE_SIZE		; src_x
-	xor edx, edx			; src_y
+	mov eax, r13d
+	xor edx, edx
+	mov ecx, ATLAS_COLS
+	div ecx					; eax = row, edx = col
+	imul edx, TILE_SIZE		; edx = src_x px
+	imul eax, TILE_SIZE		; eax = src_y px
+	mov esi, edx			; src_x
+	; src_y goes into edx for the blit signature
+	mov edx, eax			; src_y
 	mov ecx, TILE_SIZE		; src_w
 	mov r8d, TILE_SIZE		; src_h
 	mov r9d, [rbp-8]
