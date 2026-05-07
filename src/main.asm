@@ -283,6 +283,9 @@ main: ; stack alignment:
 	; advance the tile-animation tick
 	inc dword [tile_anim_ticks]
 
+	; tree neighbour spread
+	call tree_regrowth_tick
+
 	; tick the floating text overlay (fade/lift)
 	call floattext_tick
 

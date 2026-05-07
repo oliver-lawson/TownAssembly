@@ -341,4 +341,94 @@ reset_world_iterations:
 	mov dword [ca_iterations_count], CA_BASE_ITERATIONS
 	ret
 
+;================================================================
+; tree_regrowth_tick
+;----------------------------------------------------------------
+; called once per frame from main.asm
+; an attempt:
+;   - pick a random tile in the map
+;   - if it's grass AND has at least one adjacent tree (4-neighbour),
+;     replace it with a tree
+;================================================================
+%define TREE_REGROW_PERIOD 1;60	; frames between attempts
+
+section .data
+	tree_regrow_counter dd 0
+
+section .text
+tree_regrowth_tick:
+	push rbx
+	push r12
+	; throttle - only consider regrowing once per period
+	mov eax, [tree_regrow_counter]
+	inc eax
+	cmp eax, TREE_REGROW_PERIOD
+	jl .save_only
+	xor eax, eax				; reset
+	mov [tree_regrow_counter], eax
+
+	; pick a random interior tile (avoid the border ring)
+	mov edi, MAP_WIDTH - 2
+	call rng_range
+	inc eax						; in [1, MAP_WIDTH-1)
+	mov ebx, eax				; tx
+	mov edi, MAP_HEIGHT - 2
+	call rng_range
+	inc eax						; ty in [1, MAP_HEIGHT-1)
+	mov r12d, eax
+
+	; current tile must be grass
+	mov edi, ebx
+	mov esi, r12d
+	call tile_at
+	cmp eax, TILE_GRASS
+	jne .out
+
+	; need at least one adjacent tree (NESW)
+	mov edi, ebx
+	mov esi, r12d
+	dec esi
+	call tile_at
+	cmp eax, TILE_TREE
+	je .grow
+
+	mov edi, ebx
+	mov esi, r12d
+	inc esi
+	call tile_at
+	cmp eax, TILE_TREE
+	je .grow
+
+	mov edi, ebx
+	dec edi
+	mov esi, r12d
+	call tile_at
+	cmp eax, TILE_TREE
+	je .grow
+
+	mov edi, ebx
+	inc edi
+	mov esi, r12d
+	call tile_at
+	cmp eax, TILE_TREE
+	je .grow
+
+	jmp .out
+
+.grow:
+	; write tree into tilemap at (ebx, r12d)
+	mov eax, r12d
+	imul eax, MAP_WIDTH
+	add eax, ebx
+	lea rcx, [tilemap]
+	mov byte [rcx + rax], TILE_TREE
+	jmp .out
+
+.save_only:
+	mov [tree_regrow_counter], eax
+.out:
+	pop r12
+	pop rbx
+	ret
+
 %endif
