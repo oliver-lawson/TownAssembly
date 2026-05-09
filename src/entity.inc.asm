@@ -341,6 +341,80 @@ entity_try_move:
 	ret
 
 ;================================================================
+; entity_try_open_door_in_dir
+;----------------------------------------------------------------
+; if the tile one step in front of entity #edi (in direction dx,dy)
+; is a closed door, open it. used by NPCs to push through doors
+; that are blocking them. closing them is left to the player for now
+;
+; we use the *destination tile* of the attempted step rather than
+; "tile in facing direction" because entity speed varies with tile
+; (water etc) and at sub-pixel rates the destination computed here
+; matches what entity_try_move just rejected
+;----------------------------------------------------------------
+; in:  edi = entity index, esi = dx, edx = dy
+; out: eax = 1 if a door was opened, 0 otherwise
+;================================================================
+entity_try_open_door_in_dir:
+	push rbx
+	push r12
+	mov ebx, esi			; dx
+	mov r12d, edx			; dy
+
+	; ent ptr -> rax
+	call entity_ptr
+
+	; destination pixel = (x + dx, y + dy)
+	mov edi, [rax + ENT_X_OFFSET]
+	add edi, ebx
+	mov esi, [rax + ENT_Y_OFFSET]
+	add esi, r12d
+
+	; convert to tile coords (matches tile_at_pixel's floor-divide)
+	; for our use we only ever pass small integer dx/dy, so the
+	; entity centre + dx is normally still in-bounds; tile_at handles
+	; oob as TILE_STONE which won't match a door anyway
+	mov eax, edi
+	cdq
+	mov ecx, TILE_SIZE
+	idiv ecx
+	test edx, edx
+	jns .x_ok
+	dec eax
+.x_ok:
+	mov ebx, eax			; tx
+
+	mov eax, esi
+	cdq
+	idiv ecx
+	test edx, edx
+	jns .y_ok
+	dec eax
+.y_ok:
+	mov r12d, eax			; ty
+
+	; is it a closed door?
+	mov edi, ebx
+	mov esi, r12d
+	call tile_at
+	call tile_is_door_closed
+	test eax, eax
+	jz .nope
+
+	; open it
+	mov edi, ebx
+	mov esi, r12d
+	call door_toggle_at
+	mov eax, 1
+	jmp .out
+.nope:
+	xor eax, eax
+.out:
+	pop r12
+	pop rbx
+	ret
+
+;================================================================
 ; entity_wander_tick: per-frame AI for a single wander-style entity
 ;----------------------------------------------------------------
 ; if its direction-countdown runs out, picks a new (direction, ticks)
@@ -440,8 +514,36 @@ entity_wander_tick:
 	jmp .out
 
 .blocked_animate:
-	; bumped a wall - cancel the rest of this direction so
-	; can be picked again next tick.  also reset anim to idle pose
+	; bumped *something* - if it was a closed door we can just open it
+	; and try again next tick. otherwise cancel the direction so a new
+	; one is picked
+	;
+	; recompute (dx, dy) from AI_DIR_OFFSET because entity_try_move
+	; clobbers ecx so our dy is gone by here
+	xor esi, esi			; dx
+	xor edx, edx			; dy
+	movzx eax, byte [r13 + ENT_AI_DIR_OFFSET]
+	cmp eax, AI_DIR_UP
+	jne .ba_not_up
+	mov edx, -WANDER_STEP
+	jmp .ba_have_dir
+.ba_not_up:
+	cmp eax, AI_DIR_DOWN
+	jne .ba_not_down
+	mov edx, WANDER_STEP
+	jmp .ba_have_dir
+.ba_not_down:
+	cmp eax, AI_DIR_LEFT
+	jne .ba_not_left
+	mov esi, -WANDER_STEP
+	jmp .ba_have_dir
+.ba_not_left:
+	cmp eax, AI_DIR_RIGHT
+	jne .ba_have_dir
+	mov esi, WANDER_STEP
+.ba_have_dir:
+	mov edi, ebx
+	call entity_try_open_door_in_dir
 	mov word [r13 + ENT_AI_TICKS_OFFSET], 0
 	;jmp .idle
 .idle:

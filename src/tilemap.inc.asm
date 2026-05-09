@@ -2,9 +2,10 @@
 ;
 ; world is a 2d grid of tile_id bytes
 ; each tile_id indexes into a texture atlas
-; currently just a single horizontal row
-; [tile 0][tile 1]etc, each tile being TILE_SIZE^2 px
-; so tile n starts at (n * TILE_SIZE, 0) for now
+; layout: ATLAS_COLS columns, multiple rows. slot N is at
+; (N%COLS, N/COLS) * TILE_SIZE pixels
+; row 0: terrain (grass, water, stone, dirt, tree)
+; row 1: built/crafted (floor, wall, doors, furniture)
 ;
 ; rendering: for each (tx,ty) on screen:
 ; look up the tile_id, compute its source rect in the atlas, blit
@@ -17,15 +18,28 @@
 %define MAP_HEIGHT 60	; 60*16 = 960 px tall,  2x WINDOW_H
 
 ; tile IDs, matching the tiles.ppm atlas
-%define TILE_GRASS	0
-%define TILE_WATER	1
-%define TILE_STONE	2
-%define TILE_DIRT	3
-%define TILE_TREE	4
-%define TILE_WOOD_FLOOR  5
-%define TILE_WOOD_WALL   6
-%define TILE_WOOD_DOOR   7
-%define TILE_COUNT		 8
+%define TILE_GRASS				0
+%define TILE_WATER				1
+%define TILE_STONE				2
+%define TILE_DIRT				3
+%define TILE_TREE				4
+%define TILE_WOOD_FLOOR			5
+%define TILE_WOOD_WALL			6
+; doors come in 4 flavours - {NS,EW} x {closed, open}
+; NS = door connects rooms to the N and S, ie wall runs E-W;
+; EW = wall runs N-S so door faces left/right
+; closed blocks movement, open is walkable
+%define TILE_WOOD_DOOR_NS_C		7
+%define TILE_WOOD_DOOR_NS_O		8
+%define TILE_WOOD_DOOR_EW_C		9
+%define TILE_WOOD_DOOR_EW_O		10
+%define TILE_BED				11
+%define TILE_CHAIR				12
+%define TILE_COUNT				13
+
+; backwards-compat alias for previous door
+; really door_ns_closed; orientation is resolved at place time
+%define TILE_WOOD_DOOR			TILE_WOOD_DOOR_NS_C
 
 
 ; atlas slots - linear index across atlas.ppm
@@ -34,14 +48,19 @@
 ; row 0 is terrain, row 1 is built/crafted objects
 %define ATLAS_COLS			9
 
-%define ATLAS_GRASS_BASE	0	; row 0: 2 variants (0..1)
-%define ATLAS_WATER_BASE	2	; row 0: 4 anim frames (2..5)
-%define ATLAS_STONE			6
-%define ATLAS_DIRT			7
-%define ATLAS_TREE			8
-%define ATLAS_WOOD_FLOOR	9	; row 1, col 0
-%define ATLAS_WOOD_WALL		10
-%define ATLAS_WOOD_DOOR		11
+%define ATLAS_GRASS_BASE		0	; row 0: 2 variants (0..1)
+%define ATLAS_WATER_BASE		2	; row 0: 4 anim frames (2..5)
+%define ATLAS_STONE				6
+%define ATLAS_DIRT				7
+%define ATLAS_TREE				8
+%define ATLAS_WOOD_FLOOR		9	; row 1, col 0
+%define ATLAS_WOOD_WALL			10
+%define ATLAS_WOOD_DOOR_NS_C	11
+%define ATLAS_WOOD_DOOR_NS_O	12
+%define ATLAS_WOOD_DOOR_EW_C	13
+%define ATLAS_WOOD_DOOR_EW_O	14
+%define ATLAS_BED				15
+%define ATLAS_CHAIR				16
 
 %define ATLAS_GRASS_VARIANTS	2
 %define ATLAS_WATER_FRAMES		4
@@ -59,21 +78,31 @@ section .data
 		db 0		; tree
 		db 100		; wood floor
 		db 0		; wood wall
-		db 100		; wood door
+		db 0		; wood door ns closed
+		db 100		; wood door ns open
+		db 0		; wood door ew closed
+		db 100		; wood door ew open
+		db 0		; bed
+		db 0		; chair
 
 
 	; tile_id -> base atlas slot. multi-variant tiles (grass, water)
 	; resolve to a specific slot in draw_tilemap,
 	; this table just gives the starting offset
 	tile_atlas_base:
-		db ATLAS_GRASS_BASE	; grass
-		db ATLAS_WATER_BASE	; water
-		db ATLAS_STONE		; stone
-		db ATLAS_DIRT		; dirt
-		db ATLAS_TREE		; tree
-		db ATLAS_WOOD_FLOOR	; wood floor
-		db ATLAS_WOOD_WALL	; wood wall
-		db ATLAS_WOOD_DOOR	; wood door
+		db ATLAS_GRASS_BASE			; grass
+		db ATLAS_WATER_BASE			; water
+		db ATLAS_STONE				; stone
+		db ATLAS_DIRT				; dirt
+		db ATLAS_TREE				; tree
+		db ATLAS_WOOD_FLOOR			; wood floor
+		db ATLAS_WOOD_WALL			; wood wall
+		db ATLAS_WOOD_DOOR_NS_C		; door ns closed
+		db ATLAS_WOOD_DOOR_NS_O		; door ns open
+		db ATLAS_WOOD_DOOR_EW_C		; door ew closed
+		db ATLAS_WOOD_DOOR_EW_O		; door ew open
+		db ATLAS_BED				; bed
+		db ATLAS_CHAIR				; chair
 
 
 section .bss
@@ -92,6 +121,200 @@ section .bss
 	tile_anim_ticks resd 1
 
 section .text
+
+;================================================================
+; tile_is_door: is this tile id any kind of door?
+;----------------------------------------------------------------
+; in:  eax = tile id
+; out: eax = 1 if door (any orientation/state), else 0
+;================================================================
+tile_is_door:
+	cmp eax, TILE_WOOD_DOOR_NS_C
+	jl .no
+	cmp eax, TILE_WOOD_DOOR_EW_O
+	jg .no
+	mov eax, 1
+	ret
+.no:
+	xor eax, eax
+	ret
+
+;================================================================
+; tile_is_door_closed: is this tile id a closed door?
+;----------------------------------------------------------------
+; we use this for npc auto-open behaviour - they only need to
+; nudge a door when it's blocking them
+;----------------------------------------------------------------
+; in:	eax = tile id
+; out:	eax = 1 if closed door, else 0
+;================================================================
+tile_is_door_closed:
+	cmp eax, TILE_WOOD_DOOR_NS_C
+	je .yes
+	cmp eax, TILE_WOOD_DOOR_EW_C
+	je .yes
+	xor eax, eax
+	ret
+.yes:
+	mov eax, 1
+	ret
+
+;================================================================
+; tile_is_wall_like: tile blocks movement and looks like a wall
+;----------------------------------------------------------------
+; used by door-orientation autodetect at placement: a "wall" for
+; this purpose is anything we'd put a door between - currently
+; just wood walls and stone tiles. trees not included as they're
+; usually decorative not structural
+;----------------------------------------------------------------
+; in:  eax = tile id
+; out: eax = 1 if wall-like, else 0
+;================================================================
+tile_is_wall_like:
+	cmp eax, TILE_WOOD_WALL
+	je .yes
+	cmp eax, TILE_STONE
+	je .yes
+	xor eax, eax
+	ret
+.yes:
+	mov eax, 1
+	ret
+
+;================================================================
+; door_pick_orientation: NS or EW door at (tx, ty)?
+;----------------------------------------------------------------
+; checks the four tile neighbours:
+;   - NS (door between N and S walls): N and S neighbours are walls
+;   - EW (door between E and W walls): E and W neighbours are walls
+; if both are true (corner case in odd shapes), we prefer NS
+; if neither, default to NS
+;----------------------------------------------------------------
+; in:	edi = tx, esi = ty
+; out:	eax = TILE_WOOD_DOOR_NS_C or TILE_WOOD_DOOR_EW_C
+;================================================================
+door_pick_orientation:
+	push rbx
+	push r12
+	push r13
+	push r14
+	mov ebx, edi			; tx
+	mov r12d, esi			; ty
+	xor r13d, r13d			; ns flag
+	xor r14d, r14d			; ew flag
+
+	; N neighbour
+	mov edi, ebx
+	mov esi, r12d
+	dec esi
+	call tile_at
+	call tile_is_wall_like
+	test eax, eax
+	jz .no_n
+	; S neighbour
+	mov edi, ebx
+	mov esi, r12d
+	inc esi
+	call tile_at
+	call tile_is_wall_like
+	test eax, eax
+	jz .no_n
+	mov r13d, 1				; both N+S walls -> ns candidate
+.no_n:
+
+	; W neighbour
+	mov edi, ebx
+	dec edi
+	mov esi, r12d
+	call tile_at
+	call tile_is_wall_like
+	test eax, eax
+	jz .no_e
+	; E neighbour
+	mov edi, ebx
+	inc edi
+	mov esi, r12d
+	call tile_at
+	call tile_is_wall_like
+	test eax, eax
+	jz .no_e
+	mov r14d, 1				; both E+W walls -> ew candidate
+.no_e:
+
+	; pick: ns wins if set, then ew, else default ns
+	test r13d, r13d
+	jnz .ns
+	test r14d, r14d
+	jnz .ew
+.ns:
+	mov eax, TILE_WOOD_DOOR_NS_C
+	jmp .out
+.ew:
+	mov eax, TILE_WOOD_DOOR_EW_C
+.out:
+	pop r14
+	pop r13
+	pop r12
+	pop rbx
+	ret
+
+;================================================================
+; door_toggle_at: open<->close the door tile at (tx, ty), if any
+;----------------------------------------------------------------
+; closed -> open and vice versa, preserving NS/EW orientation
+; no-op if the target isn't a door
+;----------------------------------------------------------------
+; in:	edi = tx, esi = ty
+; out:	eax = 1 if a door was toggled, 0 otherwise
+;================================================================
+door_toggle_at:
+	push rbx
+	push r12
+	mov ebx, edi			; tx
+	mov r12d, esi			; ty
+
+	mov edi, ebx
+	mov esi, r12d
+	call tile_at
+	; eax = tile id
+
+	; switch on door type
+	cmp eax, TILE_WOOD_DOOR_NS_C
+	je .ns_to_open
+	cmp eax, TILE_WOOD_DOOR_NS_O
+	je .ns_to_closed
+	cmp eax, TILE_WOOD_DOOR_EW_C
+	je .ew_to_open
+	cmp eax, TILE_WOOD_DOOR_EW_O
+	je .ew_to_closed
+	; not a door - nothing to do
+	xor eax, eax
+	jmp .out
+
+.ns_to_open:
+	mov eax, TILE_WOOD_DOOR_NS_O
+	jmp .write
+.ns_to_closed:
+	mov eax, TILE_WOOD_DOOR_NS_C
+	jmp .write
+.ew_to_open:
+	mov eax, TILE_WOOD_DOOR_EW_O
+	jmp .write
+.ew_to_closed:
+	mov eax, TILE_WOOD_DOOR_EW_C
+.write:
+	; tilemap[ty*MW + tx] = new tile id
+	mov ecx, r12d
+	imul ecx, MAP_WIDTH
+	add ecx, ebx
+	lea rdx, [tilemap]
+	mov [rdx + rcx], al
+	mov eax, 1
+.out:
+	pop r12
+	pop rbx
+	ret
+
 ;================================================================
 ; init_tilemap_test: fill map with a test pattern TEMP
 ;----------------------------------------------------------------

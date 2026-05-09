@@ -44,14 +44,16 @@
 %define ITEM_WOOD_FLOOR	1
 %define ITEM_WOOD_WALL	2
 %define ITEM_WOOD_DOOR	3
-%define ITEM_COUNT		4
+%define ITEM_BED		4
+%define ITEM_CHAIR		5
+%define ITEM_COUNT		6
 
 ; --- recipes ---
 ; recipe row layout: 9 pattern bytes + 1 result byte = 10 bytes
 ; recipes ordered by output id
 ; NB add a new row + bump RECIPE_COUNT to extend
 %define RECIPE_STRIDE	10
-%define RECIPE_COUNT	6
+%define RECIPE_COUNT	8
 
 ; -- crafting grid + result slot --
 %define GRID_W 3
@@ -142,6 +144,24 @@ section .data
 		db INGRED_WOOD,  INGRED_WOOD,  INGRED_WOOD
 		db INGRED_STONE, INGRED_STONE, INGRED_STONE
 		db ITEM_WOOD_DOOR
+
+		; bed - food for blanket for now...
+		;	fff
+		;	www
+		;	www
+		db INGRED_FOOD,  INGRED_FOOD,  INGRED_FOOD
+		db INGRED_WOOD,  INGRED_WOOD,  INGRED_WOOD
+		db INGRED_WOOD,  INGRED_WOOD,  INGRED_WOOD
+		db ITEM_BED
+
+		; chair
+		;	w.w
+		;	www
+		;	w.w
+		db INGRED_WOOD,  INGRED_NONE,  INGRED_WOOD
+		db INGRED_WOOD,  INGRED_WOOD,  INGRED_WOOD
+		db INGRED_WOOD,  INGRED_NONE,  INGRED_WOOD
+		db ITEM_CHAIR
 		
 		; easy recipes for debugging:
 		db INGRED_WOOD, INGRED_NONE, INGRED_NONE
@@ -175,6 +195,8 @@ section .data
 	inv_item_name_floor	db "Wood Floor", 0
 	inv_item_name_wall	db "Wood Wall", 0
 	inv_item_name_door	db "Wood Door", 0
+	inv_item_name_bed	db "Bed", 0
+	inv_item_name_chair	db "Chair", 0
 
 	; ingredient -> background tint drawn under the icon in crafting
 	; cells/cursor (icons are opaque art so this only shows around the
@@ -199,13 +221,17 @@ section .data
 		db 4	; gold
 
 	; placeable items -> the tile id they put in the world
-	; lookup table
+	; lookup table.  doors get their orientation picked at place
+	; time, so we resolve to the "ns closed" variant here and the
+	; placement code may swap to ew if the neighbours suggest it
 	align 4
 	item_tile_id:
 		db 0	; none
 		db TILE_WOOD_FLOOR
 		db TILE_WOOD_WALL
-		db TILE_WOOD_DOOR
+		db TILE_WOOD_DOOR	; alias for ns closed
+		db TILE_BED
+		db TILE_CHAIR
 
 	; on-fail floattext for placement mode
 	inv_msg_blocked		db "blocked", 0
@@ -245,6 +271,18 @@ section .bss
 	place_mode	resb 1	; 1 if active
 	place_item	resb 1	; ITEM_* currently selected
 
+	; -- hotbar state --
+	; per item shows (1..ITEM_COUNT-1). hotbar_selected is the
+	; item id currently highlighted; ITEM_NONE means nothing selected
+	; and nothing happens. selecting flips into placement mode for
+	; that item (provided we have at least one)
+	hotbar_selected	resb 1
+	; one-shot mouse wheel delta accumulated by event polling
+	; positive = scroll up, negative = scroll down. the per-frame
+	; consumer reads it and zeros it
+	alignb 4
+	mouse_wheel_dy	resd 1
+
 section .text
 
 ;================================================================
@@ -257,6 +295,8 @@ inv_init:
 	mov byte [craft_result], ITEM_NONE
 	mov byte [place_mode], 0
 	mov byte [place_item], ITEM_NONE
+	mov byte [hotbar_selected], ITEM_NONE
+	mov dword [mouse_wheel_dy], 0
 	mov byte [mouse_l_clicked], 0
 	mov byte [mouse_r_clicked], 0
 	; clear the crafting grid
@@ -846,6 +886,8 @@ inv_handle_click:
 	jz .out					; have none, just ignore
 	mov [place_item], bl
 	mov byte [place_mode], 1
+	; mirror choice on the hotbar so it lights up the same slot
+	mov [hotbar_selected], bl
 	; close inventory so the player can see the world for placement
 	call inv_toggle
 	jmp .out
@@ -1594,6 +1636,17 @@ place_at_mouse:
 	movzx eax, byte [place_item]
 	lea rcx, [item_tile_id]
 	movzx eax, byte [rcx + rax]
+
+	; doors: pick NS vs EW from the tile's neighbours.  the item
+	; table maps to the NS-closed variant by default, but if the
+	; wall runs east-west around this tile, use EW variant instead
+	cmp byte [place_item], ITEM_WOOD_DOOR
+	jne .write_tile
+	mov edi, ebx
+	mov esi, r12d
+	call door_pick_orientation
+	; eax now holds the chosen door tile id (NS or EW closed)
+.write_tile:
 	; write the tile
 	mov ecx, r12d
 	imul ecx, MAP_WIDTH
@@ -1715,6 +1768,106 @@ place_draw_cursor:
 	pop r12
 	pop rbx
 .out:
+	ret
+
+;================================================================
+; hotbar_set_select
+;----------------------------------------------------------------
+; pick item id #al as the hotbar selection, and if we have at
+; least one of it, drop into placement mode.  if we have none,
+; we still record the selection (so the slot lights up) but the
+; game won't enter placement until the player crafts one
+;----------------------------------------------------------------
+; in:	al = item id (ITEM_NONE/.WOOD_FLOOR/..ITEM_COUNT-1)
+;================================================================
+hotbar_set_select:
+	cmp al, ITEM_COUNT
+	jge .out			; out of range -> ignore
+	cmp al, ITEM_NONE
+	je .clear
+
+	mov [hotbar_selected], al
+	movzx ecx, al
+	movzx edx, word [inv_item_count + rcx*2]
+	test edx, edx
+	jz .out				; selected but none owned -> no place mode
+	mov [place_item], al
+	mov byte [place_mode], 1
+.out:
+	ret
+.clear:
+	mov byte [hotbar_selected], ITEM_NONE
+	; don't auto-cancel placement here - q already does that
+	ret
+
+;================================================================
+; hotbar_cycle
+;----------------------------------------------------------------
+; advance the hotbar selection by +1 or -1, wrapping across the
+; range of real items.  used by mouse wheel handler.  ignores
+; any items the player has zero of, so we cycle only among
+; useful slots
+;
+; if every slot is empty, we just clear the selection
+;----------------------------------------------------------------
+; in:	edi = delta (+1 or -1, only the sign matters)
+;================================================================
+hotbar_cycle:
+	push rbx
+	push r12
+	push r13
+
+	; ebx = current selection (or 0 = none)
+	movzx ebx, byte [hotbar_selected]
+	; clamp delta to +/-1.  invert so wheel-down (sdl negative)
+	; advances to the next slot
+	mov r12d, edi
+	test r12d, r12d
+	jns .pos
+	mov r12d, 1
+	jmp .have_step
+.pos:
+	mov r12d, -1
+.have_step:
+
+	; r13 = max attempts (one full lap through real items)
+	mov r13d, ITEM_COUNT - 1
+.try_loop:
+	test r13d, r13d
+	jz .none_found
+
+	; advance ebx by step, wrapping in [1, ITEM_COUNT-1]
+	add ebx, r12d
+	cmp ebx, ITEM_COUNT
+	jl .no_wrap_high
+	mov ebx, 1			; wrapped past the end
+.no_wrap_high:
+	cmp ebx, 1
+	jge .no_wrap_low
+	mov ebx, ITEM_COUNT - 1	; wrapped past the start
+.no_wrap_low:
+
+	; do we own any of this item?
+	movzx eax, word [inv_item_count + rbx*2]
+	test eax, eax
+	jnz .pick
+
+	dec r13d
+	jmp .try_loop
+
+.pick:
+	; selected ebx as the new item
+	mov al, bl
+	call hotbar_set_select
+	jmp .out
+
+.none_found:
+	; nothing in inventory at all - clear it out
+	mov byte [hotbar_selected], ITEM_NONE
+.out:
+	pop r13
+	pop r12
+	pop rbx
 	ret
 
 %endif

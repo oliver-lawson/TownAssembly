@@ -57,6 +57,7 @@ extern SDL_GetMouseState
 %define SDL_TEXTINPUT_EVENT 0x303
 %define SDL_MOUSEBUTTONDOWN 0x401
 %define SDL_MOUSEBUTTONUP   0x402
+%define SDL_MOUSEWHEEL_EVENT 0x403
 
 ; SDL_GetMouseState returns button mask, these are the bit positions
 %define SDL_BUTTON_LEFT		1
@@ -84,6 +85,17 @@ extern SDL_GetMouseState
 %define SCANCODE_BACKTICK	53
 %define SCANCODE_RETURN		40
 %define SCANCODE_BACKSPACE	42
+; number row 1..9 + 0 (SDL has 1=30, 2=31, ..., 9=38, 0=39)
+%define SCANCODE_1			30
+%define SCANCODE_2			31
+%define SCANCODE_3			32
+%define SCANCODE_4			33
+%define SCANCODE_5			34
+%define SCANCODE_6			35
+%define SCANCODE_7			36
+%define SCANCODE_8			37
+%define SCANCODE_9			38
+%define SCANCODE_0			39
 
 ; SDL_Event layout (we only care about the bits we use)
 ;	offset 0:  Uint32 type
@@ -93,6 +105,19 @@ extern SDL_GetMouseState
 %define SDL_EVENT_TYPE_OFF		0
 %define SDL_EVENT_TEXT_OFF		12
 %define SDL_EVENT_SCANCODE_OFF	16
+; SDL_MouseWheelEvent layout in the union:
+; struct {
+;   Uint32 type;		offset 0
+;   Uint32 timestamp;	offset 4
+;   Uint32 windowID;	offset 8
+;   Uint32 which;		offset 12
+;   Sint32 x;			offset 16  - h scroll (cols)
+;   Sint32 y;			offset 20  - v scroll (lines)
+;   Uint32 direction;	offset 24
+; }
+; standard wheel up = y > 0, wheel down = y < 0 
+%define SDL_EVENT_WHEEL_X_OFF	16
+%define SDL_EVENT_WHEEL_Y_OFF	20
 %define SDL_EVENT_SIZE			64
 
 %endif

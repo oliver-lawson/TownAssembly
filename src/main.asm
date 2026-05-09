@@ -11,9 +11,9 @@ default rel
 %include "entity.inc.asm"
 %include "entity_player.inc.asm"
 %include "debug.inc.asm"
-%include "hud.inc.asm"
 %include "console.inc.asm"
 %include "inventory.inc.asm"
+%include "hud.inc.asm"
 
 section .data
 	window_title		db "Town Assembly", 0
@@ -44,7 +44,7 @@ section .data
 	hud_label_fps		db "fps", 0
 	hud_label_iters		db "iters", 0
 	hud_label_seed		db "seed", 0
-	hud_help			db "` console F3 hud  F5 restart  i inventory", 0
+	hud_help			db "` console,F3 hud,F4 smooth,F5,e,i,1-5 ", 0
 
 	; log messages
 	log_msg_started		db 0x1, " world generated! ", 0x3, 0
@@ -70,6 +70,9 @@ section .bss ; uninitialised buffers
 	key_action_pressed	resb 1
 	key_inv_pressed		resb 1
 	key_close_pressed	resb 1
+	; hotbar select: 0 means nothing pressed, otherwise the digit
+	; pressed (1..N).  cleared after consumed
+	key_hotbar_digit	resb 1
 
 
 	; player state - source of truth TODO: extract for collision etc
@@ -276,6 +279,40 @@ main: ; stack alignment:
 	call inv_toggle
 .no_inv:
 
+	; hotbar number key: select the slot's item.  ignored if the
+	; inventory is open so 1..9 typing in the console doesn't
+	; trigger placement
+	movzx eax, byte [key_hotbar_digit]
+	test eax, eax
+	jz .no_hotbar_digit
+	; consume the one-shot before any calls clobber registers
+	mov byte [key_hotbar_digit], 0
+	push rax					; stash the digit
+	call inv_is_open
+	pop rcx						; rcx = the digit
+	test eax, eax
+	jnz .no_hotbar_digit			; inv up - drop the press
+	; map digit (1..N) to ITEM_* (1..ITEM_COUNT-1).  hotbar slot
+	; n == item id n, simple as that for now
+	mov al, cl
+	call hotbar_set_select
+.no_hotbar_digit:
+
+	; mouse wheel: cycle hotbar selection.  consumed once per
+	; frame/uses sign of the accum only
+	mov eax, [mouse_wheel_dy]
+	test eax, eax
+	jz .no_wheel
+	mov dword [mouse_wheel_dy], 0
+	push rax
+	call inv_is_open
+	pop rcx
+	test eax, eax
+	jnz .no_wheel				; inv up - inventory might want it later
+	mov edi, ecx
+	call hotbar_cycle
+.no_wheel:
+
 	; Q closes the inventory if open, else cancels placement mode
 	cmp byte [key_close_pressed], 0
 	je .no_close
@@ -419,6 +456,11 @@ main: ; stack alignment:
 
 	; bottom HUD bar
 	call draw_hud_bar
+
+	; hotbar strip just above the HUD bar.  drawn after the HUD
+	; (so it overlaps cleanly) but before the inventory screen
+	; (so opening the inv hides it - one place at a time)
+	call draw_hotbar
 
 	; inventory screen: drawn before console/status so the console can
 	; still pop on top, but after the bottom HUD so it covers it
@@ -623,6 +665,8 @@ process_sdl_events:
 	je .got_textinput
 	cmp eax, SDL_MOUSEBUTTONDOWN
 	je .got_mousedown
+	cmp eax, SDL_MOUSEWHEEL_EVENT
+	je .got_mousewheel
 	jmp .poll
 
 .got_quit:
@@ -666,6 +710,15 @@ process_sdl_events:
 	je .key_i
 	cmp eax, SCANCODE_Q
 	je .key_q
+	; SDL has SCANCODE_1..9 as 30..38 (contiguous), pick up the
+	; whole range in one go and stash the digit (1..9) for the
+	; main loop's hotbar handler to consume
+	cmp eax, SCANCODE_1
+	jl .poll
+	cmp eax, SCANCODE_9
+	jg .poll
+	sub eax, SCANCODE_1 - 1		; 30 -> 1, 38 -> 9
+	mov byte [key_hotbar_digit], al
 	jmp .poll
 
 .key_escape: ; TMP - too easy to press when console open
@@ -714,6 +767,15 @@ process_sdl_events:
 	jmp .poll
 .mb_right:
 	mov byte [mouse_r_clicked], 1
+	jmp .poll
+
+.got_mousewheel:
+	; SDL_MouseWheelEvent.y is at offset 20, Sint32.  positive
+	; means wheel rolled up (away from user), negative is down
+	; we accumulate so a fast spin doesn't lose ticks - the main
+	; loop reads the sign and resets to 0
+	mov eax, [event_buf + SDL_EVENT_WHEEL_Y_OFF]
+	add [mouse_wheel_dy], eax
 	jmp .poll
 
 .done:
@@ -999,6 +1061,17 @@ try_player_action:
 	js .out
 	cmp r12d, MAP_HEIGHT
 	jge .out
+
+	; --- door toggle ---
+	; if the target tile is a door, toggle open/closed and stop
+	; trying it before the entity scan and the gather scan because
+	; we do want E to be primarily "interact with the thing in
+	; front" - and doors win over standing-on-grass-do-nothing
+	mov edi, ebx
+	mov esi, r12d
+	call door_toggle_at
+	test eax, eax
+	jnz .out
 
 	; --- look for npc entity in that tile ---
 	; scan all alive non-player entities; first whose centre lies in
