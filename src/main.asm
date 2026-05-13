@@ -10,6 +10,7 @@ default rel
 %include "tilemap.inc.asm"
 %include "entity.inc.asm"
 %include "entity_player.inc.asm"
+%include "shadow.inc.asm"
 %include "worldgen.inc.asm"
 %include "debug.inc.asm"
 %include "console.inc.asm"
@@ -1609,6 +1610,14 @@ draw_entities:
 	movzx eax, byte [r13 + ENT_FLAGS_OFFSET]
 	test eax, ENT_FLAG_ALIVE
 	jz .skip
+
+	; draw shadow ellipse under the entity before the sprite
+	mov edi, [r13 + ENT_X_OFFSET]
+	sub edi, [camera_x]				; screen x
+	mov esi, [r13 + ENT_Y_OFFSET]
+	sub esi, [camera_y]
+	add esi, SHADOW_Y_OFF			; screen y (feet)
+	call draw_shadow_ellipse
 
 	; pose pick - works for any entity using the 4-frame layout
 	; (down, up, left-A, left-B). the entity's sprite_slot field is
