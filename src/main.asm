@@ -6,10 +6,11 @@ default rel
 %include "framebuffer.inc.asm"
 %include "texture.inc.asm"
 %include "blit.inc.asm"
+%include "autotile.inc.asm"
 %include "tilemap.inc.asm"
-%include "worldgen.inc.asm"
 %include "entity.inc.asm"
 %include "entity_player.inc.asm"
+%include "worldgen.inc.asm"
 %include "debug.inc.asm"
 %include "console.inc.asm"
 %include "inventory.inc.asm"
@@ -44,7 +45,7 @@ section .data
 	hud_label_fps		db "fps", 0
 	hud_label_iters		db "iters", 0
 	hud_label_seed		db "seed", 0
-	hud_help			db "` console,F3 hud,F4 smooth,F5,e,i,1-5 ", 0
+	hud_help			db "` console F3 hud F5 restart i inv 1-5 hotbar", 0
 
 	; log messages
 	log_msg_started		db 0x1, " world generated! ", 0x3, 0
@@ -443,6 +444,12 @@ main: ; stack alignment:
 	; --- render ---
 	lea rdi, [atlas_tex]
 	call draw_tilemap 
+
+	; object overlay - magenta-keyed sprites on top of the ground:
+	; trees/doors/walls/bed etc.  drawn before entities so
+	; the player/npcs render on top of furniture they're standing on
+	lea rdi, [atlas_tex]
+	call draw_objects
 
 	; entities (player + NPCs, y-sorted)
 	call draw_entities
@@ -1131,36 +1138,42 @@ try_player_action:
 	jmp .scan
 
 .no_entity_hit:
-	; --- no entity; check tile contents ---
+	; --- no entity; check the cell contents ---
+	; objects take priority over ground - trees and stone walls
+	; both live in the object overlay and are harvestable.  the
+	; ground tile is left alone in either case
 	mov edi, ebx
 	mov esi, r12d
-	call tile_at
-	; eax = tile id
-
-	cmp eax, TILE_TREE
+	call object_at
+	cmp eax, OBJ_TREE
 	je .got_tree
-	cmp eax, TILE_STONE
+	cmp eax, OBJ_STONE_WALL
 	je .got_stone
+
+	; nothing harvestable - we're done
 	jmp .out
 
 .got_tree:
-	; replace tile with grass
+	; clear the tree from objectmap, ground stays untouched
 	mov eax, r12d
 	imul eax, MAP_WIDTH
 	add eax, ebx
-	lea rcx, [tilemap]
-	mov byte [rcx + rax], TILE_GRASS
+	lea rcx, [objectmap]
+	mov byte [rcx + rax], OBJ_NONE
 	inc word [player_res_wood]
 	lea rdi, [floattext_wood]
 	call spawn_floattext
 	jmp .out
 
 .got_stone:
+	; chop the stone wall: ground becomes dirt, object slot clears
 	mov eax, r12d
 	imul eax, MAP_WIDTH
 	add eax, ebx
-	lea rcx, [tilemap]
-	mov byte [rcx + rax], TILE_DIRT
+	lea rdx, [objectmap]
+	mov byte [rdx + rax], OBJ_NONE
+	lea rdx, [tilemap]
+	mov byte [rdx + rax], TILE_DIRT
 	inc word [player_res_stone]
 	lea rdi, [floattext_stone]
 	call spawn_floattext
@@ -1174,10 +1187,11 @@ try_player_action:
 	ret
 
 ;================================================================
-; floating text: "+1 wood" etc. above the player.
+; floating text: "+1 wood" etc above the player
 ;----------------------------------------------------------------
 ; 1 slot total, new spawns replace old. lives FT_LIFETIME ticks
 ; lifts upwards by 1px every FT_LIFT_PERIOD ticks, linear "fade"
+; TODO: experiment with colours, transparency
 ;================================================================
 %define FT_LIFETIME		50
 %define FT_LIFT_PERIOD	6

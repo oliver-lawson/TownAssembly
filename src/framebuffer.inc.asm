@@ -59,7 +59,7 @@ plot_pixel:
 ; now with alpha! if not 0xFF, don't use the fast rep stosd path,
 ; instead bleand existing fb conents using (fg*a+bg*(255-1))>>8
 ; (per channel) sadly we step away from our fake palletisation
-; of art assets here, TODO this needs more thought..
+; of art assets here, TODO: this needs more thought..
 ;---------------------------------------------------------------- 
 ; in:  edi=x, esi=y, edx=w, ecx=h, r8d=ARGB colour
 ;================================================================

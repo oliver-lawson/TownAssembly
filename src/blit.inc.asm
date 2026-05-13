@@ -192,7 +192,7 @@ blit_texture_rect:
 ; the inner loop is per-pixel rather than rep movsd, so will be
 ; slower but only used for sprites
 ;----------------------------------------------------------------
-; in: sam args as blit_texture_rect plus:
+; in: same args as blit_texture_rect plus:
 ;	  [rbp+32] = colour key (ARGB)
 ;================================================================
 blit_texture_rect_keyed:

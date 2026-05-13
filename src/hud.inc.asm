@@ -264,10 +264,13 @@ draw_hotbar:
 	mov r8d, TILE_SIZE
 	mov r9d, r12d
 	add r9d, 2				; dst_x
+	mov r10, 0xFFFF00FF		; magenta key
+	sub rsp, 8				; pad - 3 pushes would land us at 8mod16
+	push r10
 	push 0					; flip
 	push HOTBAR_Y + 2		; dst_y
-	call blit_texture_rect
-	add rsp, 16
+	call blit_texture_rect_keyed
+	add rsp, 32				; 24 stack args + 8 pad
 
 	; --- count in bottom-right corner ---
 	; only show if > 1 (1 is implied by the icon being there)

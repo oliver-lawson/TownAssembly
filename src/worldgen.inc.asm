@@ -54,6 +54,14 @@ generate_world:
 	mov qword [rng_state], 1
 .seed_ok:
 
+	; clear objectmap to OBJ_NONE.  trees later get painted into
+	; it during step 3; without this clear, restarts would inherit
+	; objects from the previous world
+	xor eax, eax
+	mov ecx, MAP_WIDTH * MAP_HEIGHT / 8
+	lea rdi, [objectmap]
+	rep stosq
+
 	; --- step 1: fill tilemap with random walls/floors ---
 	; just a linear list of tiles
 	xor r12d, r12d				; tile_index = 0
@@ -99,7 +107,7 @@ generate_world:
 	call ca_step	; one smoothing pass
 	dec r12d
 	jmp .ca_iter ; feels like 4-6 is the sweet spot, but it's cheap
-				 ; (atm, 2 tile type, on small world - TODO profile)
+				 ; (atm, 2 tile type, on small world - TODO: profile)
 				 ; that higher is fine too if wanted
 
 	; --- step 3: convert CA cells to tile ids ---
@@ -127,22 +135,42 @@ generate_world:
 	call rng_percent
 	test eax, eax
 	jz .paint_dirt
-	mov al, TILE_TREE
-	jmp .paint_write
+	; tree: ground stays grass, tree goes in object overlay
+	mov al, TILE_GRASS
+	lea rbx, [tilemap]
+	mov [rbx + r12], al
+	mov al, OBJ_TREE
+	lea rbx, [objectmap]
+	mov [rbx + r12], al
+	jmp .paint_cell_done
 
 .paint_dirt:
+	; natural dirt patch: just set the ground tile to TILE_DIRT.
 	mov al, TILE_DIRT
-	jmp .paint_write
+	lea rbx, [tilemap]
+	mov [rbx + r12], al
+	jmp .paint_cell_done
 
 .paint_grass:
 	mov al, TILE_GRASS
 	jmp .paint_write
 
 .paint_wall:
-	mov al, TILE_STONE
+	; CA wall cell: stone wall sits in the object overlay, dirt
+	; underneath as the ground.  the wall blocks movement, chopping
+	; it later justclears the overlay, leaving the dirt floor exposed
+	mov al, TILE_DIRT
+	lea rbx, [tilemap]
+	mov [rbx + r12], al
+	mov al, OBJ_STONE_WALL
+	lea rbx, [objectmap]
+	mov [rbx + r12], al
+	jmp .paint_cell_done
+
 .paint_write:
 	lea rbx, [tilemap]
 	mov [rbx + r12], al
+.paint_cell_done:
 	inc r12d
 	jmp .paint_loop
 .paint_done:
@@ -183,10 +211,11 @@ generate_world:
 	mov edx, r14d
 	add edx, ecx		; x + dx
 	add eax, edx
-	lea rbx, [tilemap]
+	; check objectmap for a stone wall
+	lea rbx, [objectmap]
 	movzx edi, byte [rbx + rax]
-	cmp edi, TILE_STONE
-	je .water_next		; stone found - leave, no water here
+	cmp edi, OBJ_STONE_WALL
+	je .water_next		; wall found - leave, no water here
 
 	inc ecx
 	jmp .water_check_x
@@ -306,8 +335,8 @@ ca_step:
 	jmp .row
 
 .write_back:
-	; copy scratch buffer back over the tilemap.
-	; rep movsb copies rcx bytes from [rsi] to [rdi].
+	; copy scratch buffer back over the tilemap
+	; rep movsb copies rcx bytes from [rsi] to [rdi]
 	mov ecx, MAP_WIDTH * MAP_HEIGHT
 	lea rsi, [ca_scratch]
 	lea rdi, [tilemap]
@@ -356,6 +385,77 @@ section .data
 	tree_regrow_counter dd 0
 
 section .text
+;================================================================
+; tile_has_entity
+;----------------------------------------------------------------
+; is any alive entity (player or NPC) standing on tile (tx, ty)?
+; used for tree growth etc
+;----------------------------------------------------------------
+; in:	edi = tx, esi = ty
+; out:	eax = 1 if occupied by an alive entity, else 0
+;================================================================
+tile_has_entity:
+	push rbx
+	push r12
+	push r13
+	push r14
+	push r15
+	; 5 callee-saves + ret = 48, 16-aligned
+
+	mov r14d, edi			; tx
+	mov r15d, esi			; ty
+	xor ebx, ebx			; loop index
+	mov r12d, [entity_count]
+.loop:
+	cmp ebx, r12d
+	jge .no
+
+	mov edi, ebx
+	call entity_ptr
+	mov r13, rax
+
+	; alive?
+	movzx eax, byte [r13 + ENT_FLAGS_OFFSET]
+	test eax, ENT_FLAG_ALIVE
+	jz .next
+
+	; entity tile = (x / TILE_SIZE, y / TILE_SIZE), floor-style
+	mov eax, [r13 + ENT_X_OFFSET]
+	cdq
+	mov ecx, TILE_SIZE
+	idiv ecx
+	test edx, edx
+	jns .ex_ok
+	dec eax
+.ex_ok:
+	cmp eax, r14d
+	jne .next
+
+	mov eax, [r13 + ENT_Y_OFFSET]
+	cdq
+	idiv ecx
+	test edx, edx
+	jns .ey_ok
+	dec eax
+.ey_ok:
+	cmp eax, r15d
+	jne .next
+
+	mov eax, 1
+	jmp .out
+.next:
+	inc ebx
+	jmp .loop
+.no:
+	xor eax, eax
+.out:
+	pop r15
+	pop r14
+	pop r13
+	pop r12
+	pop rbx
+	ret
+
 tree_regrowth_tick:
 	push rbx
 	push r12
@@ -377,51 +477,71 @@ tree_regrowth_tick:
 	inc eax						; ty in [1, MAP_HEIGHT-1)
 	mov r12d, eax
 
-	; current tile must be grass
+	; current cell must be grass ground with no blocking object.
+	; trees and other furniture in the object slot block regrowth
 	mov edi, ebx
 	mov esi, r12d
 	call tile_at
 	cmp eax, TILE_GRASS
 	jne .out
+	mov edi, ebx
+	mov esi, r12d
+	call object_at
+	test eax, eax
+	jnz .out					; something there - blocked
+.check_neighbours:
 
-	; need at least one adjacent tree (NESW)
+	; need at least one adjacent tree (NESW).  on first hit, jump
+	; to .check_occupied which gates on entity occupancy before
+	; actually growing - this is what stops trees from boxing
+	; the player or NPCs in
 	mov edi, ebx
 	mov esi, r12d
 	dec esi
-	call tile_at
-	cmp eax, TILE_TREE
-	je .grow
+	call object_at
+	cmp eax, OBJ_TREE
+	je .check_occupied
 
 	mov edi, ebx
 	mov esi, r12d
 	inc esi
-	call tile_at
-	cmp eax, TILE_TREE
-	je .grow
+	call object_at
+	cmp eax, OBJ_TREE
+	je .check_occupied
 
 	mov edi, ebx
 	dec edi
 	mov esi, r12d
-	call tile_at
-	cmp eax, TILE_TREE
-	je .grow
+	call object_at
+	cmp eax, OBJ_TREE
+	je .check_occupied
 
 	mov edi, ebx
 	inc edi
 	mov esi, r12d
-	call tile_at
-	cmp eax, TILE_TREE
-	je .grow
+	call object_at
+	cmp eax, OBJ_TREE
+	je .check_occupied
 
 	jmp .out
 
+.check_occupied:
+	; one of the 4 cardinal neighbours is a tree - this tile is a
+	; regrowth candidate.  bail if a player or NPC is standing on
+	; it, otherwise we trap them in their own room
+	mov edi, ebx
+	mov esi, r12d
+	call tile_has_entity
+	test eax, eax
+	jnz .out
+
 .grow:
-	; write tree into tilemap at (ebx, r12d)
+	; write tree into objectmap at (ebx, r12d) - ground stays grass
 	mov eax, r12d
 	imul eax, MAP_WIDTH
 	add eax, ebx
-	lea rcx, [tilemap]
-	mov byte [rcx + rax], TILE_TREE
+	lea rcx, [objectmap]
+	mov byte [rcx + rax], OBJ_TREE
 	jmp .out
 
 .save_only:

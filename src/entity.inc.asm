@@ -396,7 +396,7 @@ entity_try_open_door_in_dir:
 	; is it a closed door?
 	mov edi, ebx
 	mov esi, r12d
-	call tile_at
+	call object_at
 	call tile_is_door_closed
 	test eax, eax
 	jz .nope

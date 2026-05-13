@@ -2,6 +2,6 @@
 %ifndef ENTITY_PLAYER_INC
 %define ENTITY_PLAYER_INC
 
-; TODO - extract from main
+; TODO: extract from main
 
 %endif

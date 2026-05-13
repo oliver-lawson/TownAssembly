@@ -229,7 +229,7 @@ section .data
 		db 0	; none
 		db TILE_WOOD_FLOOR
 		db TILE_WOOD_WALL
-		db TILE_WOOD_DOOR	; alias for ns closed
+		db TILE_WOOD_DOOR_EW_C
 		db TILE_BED
 		db TILE_CHAIR
 
@@ -1316,18 +1316,20 @@ inv_draw_result:
 	mov r11d, eax
 	imul r11d, TILE_SIZE	; src_y
 
-	; blit_texture_rect(rdi=tex, esi=src_x, edx=src_y, ecx=src_w,
-	;		   r8d=src_h, r9d=dst_x, [stack:dst_y], [stack:flip])
+	; blit_texture_rect_keyed: same args as plain, plus colour key
+	; at [rbp+32].  using keyed here for transp craft items in hud
 	lea rdi, [atlas_tex]
 	mov esi, r10d
 	mov edx, r11d
 	mov ecx, TILE_SIZE
 	mov r8d, TILE_SIZE
 	mov r9d, INV_RESULT_X + (INV_RESULT_W - TILE_SIZE)/2
+	mov r10, 0xFFFF00FF		; magenta key
+	push r10
 	push 0	; flip
 	push INV_RESULT_Y + (INV_RESULT_H - TILE_SIZE)/2
-	call blit_texture_rect
-	add rsp, 16
+	call blit_texture_rect_keyed
+	add rsp, 24
 .out:
 	ret
 
@@ -1458,9 +1460,11 @@ inv_draw_items:
 
 	; stash count on stack across the blit. r10/r11 are caller-saved
 	; and blit_texture_rect *will* clobber them - using them to hold
-	; the count was the bug that drew "44......2.." (printing junk)
+	; the count was the bug that drew "44......2.." (printing junk).
+	; for the keyed blit we push 3 stack args (24 bytes), which
+	; combined with our push rcx (8 bytes) makes 32 - aligned, no
+	; extra padding needed
 	push rcx
-	sub rsp, 8				; keep stack aligned for the call
 
 	; tile graphic - eax still holds item id at this point
 	lea rcx, [item_tile_id]
@@ -1484,13 +1488,13 @@ inv_draw_items:
 	imul eax, INV_ITEMS_PITCH
 	add r9d, eax
 	add r9d, (INV_ITEMS_SLOT_W - TILE_SIZE)/2
-	push 0
+	mov r10, 0xFFFF00FF		; magenta key
+	push r10
+	push 0					; flip
 	push INV_ITEMS_Y + (INV_ITEMS_SLOT_H - TILE_SIZE)/2
-	call blit_texture_rect
-	add rsp, 16				; clean up the 2 stack args
+	call blit_texture_rect_keyed
+	add rsp, 24				; 3 stack args
 
-	; reclaim the count (we sub'd 8 for alignment, rcx is at +8)
-	add rsp, 8
 	pop rcx					; rcx = count
 
 	; count in the corner
@@ -1620,40 +1624,74 @@ place_at_mouse:
 	cmp r12d, MAP_HEIGHT
 	jge .fail
 
-	; only allow placing on grass/dirt (don't overwrite trees, water,
-	; stone, or things the player has already built)
+	; only allow placing on grass/dirt/floor ground - and the
+	; cell must not already have a blocking object on it
 	mov edi, ebx
 	mov esi, r12d
 	call tile_at
 	cmp eax, TILE_GRASS
-	je .ok
+	je .ground_ok
 	cmp eax, TILE_DIRT
-	je .ok
+	je .ground_ok
+	cmp eax, TILE_WOOD_FLOOR
+	je .ground_ok
 	jmp .fail
+.ground_ok:
+	mov edi, ebx
+	mov esi, r12d
+	call object_at
+	test eax, eax
+	jz .ok				; nothing there
+	jmp .fail			; tree, wall, door, furniture - blocks
 
 .ok:
-	; resolve item -> tile id
+	; resolve item -> tile/object id
 	movzx eax, byte [place_item]
 	lea rcx, [item_tile_id]
 	movzx eax, byte [rcx + rax]
 
 	; doors: pick NS vs EW from the tile's neighbours.  the item
 	; table maps to the NS-closed variant by default, but if the
-	; wall runs east-west around this tile, use EW variant instead
+	; wall runs east-west around this tile we want the EW variant
+	; instead
 	cmp byte [place_item], ITEM_WOOD_DOOR
-	jne .write_tile
+	jne .layer_pick
 	mov edi, ebx
 	mov esi, r12d
 	call door_pick_orientation
 	; eax now holds the chosen door tile id (NS or EW closed)
-.write_tile:
-	; write the tile
+
+.layer_pick:
+	; floor goes to the GROUND layer (replaces grass/dirt).
+	; everything else (wall, door, bed, chair) goes to OBJECTS
+	; with the existing ground left intact.  this is what gives
+	; us furniture-on-grass and door-with-floor-underneath
 	mov ecx, r12d
 	imul ecx, MAP_WIDTH
 	add ecx, ebx
+	cmp byte [place_item], ITEM_WOOD_FLOOR
+	jne .write_object
+	; floor: write to tilemap
 	lea rdx, [tilemap]
 	mov [rdx + rcx], al
+	jmp .placed_count
+.write_object:
+	; wall/door/bed/chair: write to objectmap
+	lea rdx, [objectmap]
+	mov [rdx + rcx], al
+	; roll a random variant byte for this cell.  walls in particular
+	; use this to break the position-hash checkerboard and pick a
+	; set independently of where they're placed.  preserved across
+	; the rng_next call by saving rcx on the stack
+	push rcx
+	sub rsp, 8					; align for the call
+	call rng_next
+	add rsp, 8
+	pop rcx
+	lea rdx, [object_variant]
+	mov [rdx + rcx], al
 
+.placed_count:
 	; decrement count
 	movzx eax, byte [place_item]
 	movzx ecx, word [inv_item_count + rax*2]
@@ -1712,10 +1750,19 @@ place_draw_cursor:
 	call tile_at
 	mov r13d, 0xFFE04040	; red (blocked default)
 	cmp eax, TILE_GRASS
-	je .ok_colour
+	je .ground_ok_for_colour
 	cmp eax, TILE_DIRT
-	je .ok_colour
+	je .ground_ok_for_colour
+	cmp eax, TILE_WOOD_FLOOR
+	je .ground_ok_for_colour
 	jmp .have_colour
+.ground_ok_for_colour:
+	; ground is fine - check object isn't blocking
+	mov edi, ebx
+	mov esi, r12d
+	call object_at
+	test eax, eax
+	jnz .have_colour		; anything in objectmap blocks
 .ok_colour:
 	mov r13d, 0xFF40E060	; green
 .have_colour:
