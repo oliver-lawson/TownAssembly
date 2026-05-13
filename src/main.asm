@@ -158,6 +158,13 @@ main: ; stack alignment:
 	mov byte  [player_moved], 0
 	call setup_world_entities ; place NPCs
 	call inv_init ; set up inventory
+	; CHEAT: give starting items so I don't have to keep crafting..
+	mov word [inv_item_count + ITEM_TORCH * 2], 12
+	mov word [inv_item_count + ITEM_CHAIR * 2], 8
+	mov word [inv_item_count + ITEM_BED * 2], 8
+	mov word [inv_item_count + ITEM_WOOD_FLOOR * 2], 24
+	mov word [inv_item_count + ITEM_WOOD_WALL * 2], 16
+	mov word [inv_item_count + ITEM_WOOD_DOOR * 2], 4
 
 	lea rdi, [log_msg_started]
 	call debug_log
