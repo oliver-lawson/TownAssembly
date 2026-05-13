@@ -46,14 +46,15 @@
 %define ITEM_WOOD_DOOR	3
 %define ITEM_BED		4
 %define ITEM_CHAIR		5
-%define ITEM_COUNT		6
+%define ITEM_TORCH		6
+%define ITEM_COUNT		7
 
 ; --- recipes ---
 ; recipe row layout: 9 pattern bytes + 1 result byte = 10 bytes
 ; recipes ordered by output id
 ; NB add a new row + bump RECIPE_COUNT to extend
 %define RECIPE_STRIDE	10
-%define RECIPE_COUNT	8
+%define RECIPE_COUNT	9
 
 ; -- crafting grid + result slot --
 %define GRID_W 3
@@ -163,6 +164,15 @@ section .data
 		db INGRED_WOOD,  INGRED_NONE,  INGRED_WOOD
 		db ITEM_CHAIR
 		
+		; torch:
+		;	.f.
+		;	.w.
+		;	...
+		db INGRED_NONE, INGRED_FOOD, INGRED_NONE
+		db INGRED_NONE, INGRED_WOOD, INGRED_NONE
+		db INGRED_NONE, INGRED_NONE, INGRED_NONE
+		db ITEM_TORCH
+
 		; easy recipes for debugging:
 		db INGRED_WOOD, INGRED_NONE, INGRED_NONE
 		db INGRED_NONE, INGRED_NONE, INGRED_NONE
@@ -178,6 +188,7 @@ section .data
 		db INGRED_NONE, INGRED_NONE, INGRED_NONE
 		db INGRED_NONE, INGRED_NONE, INGRED_NONE
 		db ITEM_WOOD_DOOR
+
 
 	; ui labels for resources + items
 	inv_title_str		db "INVENTORY", 0
@@ -197,6 +208,7 @@ section .data
 	inv_item_name_door	db "Wood Door", 0
 	inv_item_name_bed	db "Bed", 0
 	inv_item_name_chair	db "Chair", 0
+	inv_item_name_torch	db "Torch", 0
 
 	; ingredient -> background tint drawn under the icon in crafting
 	; cells/cursor (icons are opaque art so this only shows around the
@@ -232,6 +244,7 @@ section .data
 		db TILE_WOOD_DOOR_EW_C
 		db TILE_BED
 		db TILE_CHAIR
+		db TILE_TORCH
 
 	; on-fail floattext for placement mode
 	inv_msg_blocked		db "blocked", 0
