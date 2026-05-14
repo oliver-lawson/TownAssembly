@@ -255,9 +255,9 @@ section .bss
 	; cursor: which ingredient (INGRED_*) and how many of it. zero
 	; ingred means "empty cursor" regardless of count. picking up from
 	; a resource slot grabs the whole stack at once
-	inv_cursor_ingred  resb 1
+	inv_cursor_ingred	resb 1
 	alignb 2
-	inv_cursor_count   resw 1
+	inv_cursor_count	resw 1
 	; mouse state mirrored to logical-pixel coords each frame
 	alignb 4
 	mouse_lx	resd 1
