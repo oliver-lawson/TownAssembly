@@ -8,12 +8,12 @@
 ;
 ; every autotile "set" is a 4-row x 16-col block:
 ;	cols 0..11 = 12-wide blob slot pack (47 unique + 1 spare,
-;	             row-major: slot index = (local_row * 12) + col)..
-;	             slot indices map to neighbour masks per the table
-;	             baked into autotile.inc.asm
+;				 row-major: slot index = (local_row * 12) + col)..
+;				 slot indices map to neighbour masks per the table
+;				 baked into autotile.inc.asm
 ;	cols 12..15 = 16 variant slots, picked at random for the
-;	             "fully surrounded" centre case (mask 0xFF/slot 46)
-;	             to give big interior patches some variatino
+;				 "fully surrounded" centre case (mask 0xFF/slot 46)
+;				 to give big interior patches some variatino
 ;
 ; row 0 = non-autotiled tiles, fits in 16 slots. see below for list
 ;
@@ -35,9 +35,9 @@
 ;			 overlay with magenta key). cols 8..15 spare
 ;
 ; rows 4..15 (GRASS band, 3 sets, each 4 rows):
-;	rows 4..7   : grass set 0  (blob pack + 16 variants)
-;	rows 8..11  : grass set 1
-;	rows 12..15 : grass set 2
+;	rows 4..7	: grass set 0  (blob pack + 16 variants)
+;	rows 8..11	: grass set 1
+;	rows 12..15	: grass set 2
 ;
 ; rows 16..27 (STONE band, 3 sets, same shape as grass)
 ;
@@ -722,12 +722,12 @@ tile_speed_at_pixel:
 ; resolves a tile to its full atlas slot for one of the autotiled
 ; types (grass, stone, water, wood wall) using the blob scheme.
 ;
-;   1. compute the blob slot 0..46 from the 8-neighbour mask
-;   2. pick a set index (grass/stone have 3; water/wood have 1 atm)
-;   3. if the slot is the "centre" (fully surrounded), optionally
-;      swap to a variants-strip slot for some interior noise
-;   4. add the set base + (local_row * ATLAS_COLS + local_col)
-;   5. for water, advance the base by frame * 4 rows
+;	1. compute the blob slot 0..46 from the 8-neighbour mask
+;	2. pick a set index (grass/stone have 3; water/wood have 1 atm)
+;	3. if the slot is the "centre" (fully surrounded), optionally
+;		swap to a variants-strip slot for some interior noise
+;	4. add the set base + (local_row * ATLAS_COLS + local_col)
+;	5. for water, advance the base by frame * 4 rows
 ;
 ; the slot returned is a global atlas index
 ;----------------------------------------------------------------
@@ -884,9 +884,9 @@ autotile_pick_slot:
 ;----------------------------------------------------------------
 ; non-autotiled GROUND tile id -> atlas slot.  identity for most
 ; types, but a few use variant packs picked by position hash:
-;   TILE_DIRT      - 8 ground variants (opaque soil) in row 1
-;   TILE_WOOD_FLOOR - 4 variants in row 2 cols 8..11
-;   TILE_TREE      - 4 variants in row 0 cols 12..15
+;	TILE_DIRT		- 8 ground variants (opaque soil) in row 1
+;	TILE_WOOD_FLOOR - 4 variants in row 2 cols 8..11
+;	TILE_TREE		- 4 variants in row 0 cols 12..15
 ;
 ; called by draw_tilemap - the ground-layer renderer.  for the
 ; OBJECT layer's dispatch, see nonauto_pick_slot_object below
@@ -1385,6 +1385,9 @@ draw_objects:
 	jmp .have_slot
 
 .torch_obj:
+	; pass tile coords for anim start offset
+	mov edi, [rbp-8]
+	mov esi, [rbp-4]
 	call torch_atlas_slot
 	jmp .have_slot
 

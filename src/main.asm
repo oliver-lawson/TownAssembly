@@ -11,6 +11,8 @@ default rel
 %include "entity.inc.asm"
 %include "entity_player.inc.asm"
 %include "shadow.inc.asm"
+%define SPRITE_SIZE 16 ; needed here for daynight
+%include "daynight.inc.asm"
 %include "worldgen.inc.asm"
 %include "debug.inc.asm"
 %include "console.inc.asm"
@@ -29,7 +31,6 @@ section .data
 	%define TILES_Y		  (WINDOW_H / TILE_SIZE)
 
 	; -- sprite/movement constants --
-	%define SPRITE_SIZE			16
 	%define SPRITE_COLOR_KEY	0xFFFF00FF ; magenta
 	%define WORLD_PIXEL_W		(MAP_WIDTH  * TILE_SIZE)
 	%define WORLD_PIXEL_H		(MAP_HEIGHT * TILE_SIZE)
@@ -159,6 +160,8 @@ main: ; stack alignment:
 	mov byte  [player_moved], 0
 	call setup_world_entities ; place NPCs
 	call inv_init ; set up inventory
+	call daynight_reset
+
 	; CHEAT: give starting items so I don't have to keep crafting..
 	mov word [inv_item_count + ITEM_TORCH * 2], 12
 	mov word [inv_item_count + ITEM_CHAIR * 2], 8
@@ -399,6 +402,9 @@ main: ; stack alignment:
 	; tree neighbour spread
 	call tree_regrowth_tick
 
+	; advance the day/night clock
+	call daynight_tick
+
 	; tick the floating text overlay (fade/lift)
 	call floattext_tick
 
@@ -468,6 +474,10 @@ main: ; stack alignment:
 
 	; floating action text ("+1 wood" etc)
 	call floattext_draw
+
+	; day/night
+	call daynight_apply_tint
+	call daynight_draw_all_torches
 
 	; bottom HUD bar
 	call draw_hud_bar
@@ -1337,6 +1347,7 @@ restart_world:
 	; full reset wipes crafting grid, placement mode, & crafted-item
 	; counts.  resources get re-init by setup_world_entities
 	call inv_full_reset
+	call daynight_reset
 	lea rdi, [log_msg_restart]
 	call debug_log
 	pop rbp

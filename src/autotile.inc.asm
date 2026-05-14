@@ -108,10 +108,10 @@ section .text
 ; out-of-bounds counts as non-matching
 ;
 ; matching layer depends on the type:
-;   - OBJ_WOOD_WALL and OBJ_STONE_WALL live in the object overlay,
-;     so we look in objectmap for them
-;   - everything else (grass/water) is a ground tile, so we look
-;     in tilemap
+;	- OBJ_WOOD_WALL and OBJ_STONE_WALL live in the object overlay,
+;	  so we look in objectmap for them
+;	- everything else (grass/water) is a ground tile, so we look
+;	  in tilemap
 ;----------------------------------------------------------------
 ; in:	edi = tx, esi = ty, dl = tile/object id to match
 ; out:	eax = 1 if matches, 0 otherwise
