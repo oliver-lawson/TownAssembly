@@ -24,9 +24,9 @@
 %define NIGHT_END			1700;1000;12960
 
 ; --- darkness: per-channel subtraction at full night ---
-%define NIGHT_SUB_R 		100
-%define NIGHT_SUB_G 		80
-%define NIGHT_SUB_B 		40
+%define NIGHT_SUB_R 		80
+%define NIGHT_SUB_G 		60
+%define NIGHT_SUB_B 		20
 ; dithered fringe adds this extra
 %define NIGHT_DITHER_EXTRA 	32
 

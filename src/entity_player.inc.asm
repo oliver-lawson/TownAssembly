@@ -4,7 +4,7 @@
 %ifndef ENTITY_PLAYER_INC
 %define ENTITY_PLAYER_INC
 
-%define move_step		3 ; player px/frame
+%define move_step		1 ; player px/frame
 
 ; floating text params (feedback above player after gather/kill)
 %define FT_LIFETIME		50
