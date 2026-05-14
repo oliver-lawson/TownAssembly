@@ -4,7 +4,12 @@
 %ifndef ENTITY_PLAYER_INC
 %define ENTITY_PLAYER_INC
 
-%define move_step		1 ; player px/frame
+%define move_step		1		; player px/frame
+
+; sprite sheet uses 16x16 tiles with magenta as the transparent key
+; (consumed by draw_entities below)
+%define SPRITE_SIZE			16
+%define SPRITE_COLOR_KEY	0xFFFF00FF
 
 ; floating text params (feedback above player after gather/kill)
 %define FT_LIFETIME		50
@@ -471,15 +476,17 @@ floattext_draw:
 	ret
 
 ;================================================================
-; place_player_on_floor: pick a random non-stone tile and put the
-; player at its centre.  falls back to a linear scan if it can't
-; find one in 200 random tries
-; REGRESSION: need to handle stone walls differently now this just
-; looks at z=-1
+; place_player_on_floor: pick a random fully-walkable tile and
+; put the player at its centre.  uses tile_speed_at_pixel so the
+; object overlay (trees, walls, etc) is rejected too, not just
+; the ground.  falls back to a linear scan if 200 random tries
+; fail to find anywhere
 ;================================================================
 place_player_on_floor:
 	push rbx
 	push r12
+	push r13
+	sub rsp, 8					; align
 	mov r12d, 200
 .try:
 	test r12d, r12d
@@ -488,64 +495,76 @@ place_player_on_floor:
 
 	mov edi, MAP_WIDTH
 	call rng_range
-	mov ebx, eax	; tx
+	mov ebx, eax				; tx
 
 	mov edi, MAP_HEIGHT
 	call rng_range
-	mov ecx, eax	; ty
+	mov r13d, eax				; ty
 
-	imul ecx, MAP_WIDTH
-	add ecx, ebx
-	lea rdx, [tilemap]
-	movzx eax, byte [rdx + rcx]
-	; reject tiles < 100% movespeed
-	lea rdx, [tile_speed_table]
-	movzx eax, byte [rdx + rax]
+	; tile centre -> pixel, then full ground+object speed check
+	mov edi, ebx
+	imul edi, TILE_SIZE
+	add edi, TILE_SIZE/2
+	mov esi, r13d
+	imul esi, TILE_SIZE
+	add esi, TILE_SIZE/2
+	call tile_speed_at_pixel
 	cmp eax, 100
 	jne .try
 
-	imul ebx, TILE_SIZE
-	add ebx, TILE_SIZE/2
-	mov [player_x], ebx
-	mov eax, ecx
-	xor edx, edx
-	mov ecx, MAP_WIDTH
-	div ecx
-	imul eax, TILE_SIZE
-	add eax, TILE_SIZE/2
-	mov [player_y], eax
+	; commit - recompute pixel from tx/ty since the call clobbered
+	; the previous edi/esi
+	mov edi, ebx
+	imul edi, TILE_SIZE
+	add edi, TILE_SIZE/2
+	mov [player_x], edi
+	mov edi, r13d
+	imul edi, TILE_SIZE
+	add edi, TILE_SIZE/2
+	mov [player_y], edi
 
-	pop r12
+	add rsp, 8
+	pop r13
 	pop rbx
+	pop r12
 	ret
 
 .scan:
-	xor ecx, ecx
+	; linear fallback: walk every cell until we hit a walkable one
+	xor ebx, ebx				; ebx = idx
 .scan_loop:
-	cmp ecx, MAP_WIDTH * MAP_HEIGHT
+	cmp ebx, MAP_WIDTH * MAP_HEIGHT
 	jge .scan_fail
-	lea rdx, [tilemap]
-	movzx eax, byte [rdx + rcx]
-	lea rdx, [tile_speed_table]
-	movzx eax, byte [rdx + rax]
-	cmp eax, 100
-	je .scan_found
-	inc ecx
-	jmp .scan_loop
-.scan_found:
-	mov eax, ecx
+	; idx -> (tx, ty)
+	mov eax, ebx
 	xor edx, edx
 	mov ecx, MAP_WIDTH
-	div ecx
-	imul edx, TILE_SIZE
-	add edx, TILE_SIZE/2
-	mov [player_x], edx
-	imul eax, TILE_SIZE
-	add eax, TILE_SIZE/2
-	mov [player_y], eax
+	div ecx						; eax = ty, edx = tx
+	; tile centre -> pixel
+	mov edi, edx
+	imul edi, TILE_SIZE
+	add edi, TILE_SIZE/2
+	mov esi, eax
+	imul esi, TILE_SIZE
+	add esi, TILE_SIZE/2
+	; stash the candidate centre so we can write it on success
+	push rdi
+	push rsi
+	call tile_speed_at_pixel
+	pop rsi
+	pop rdi
+	cmp eax, 100
+	je .scan_found
+	inc ebx
+	jmp .scan_loop
+.scan_found:
+	mov [player_x], edi
+	mov [player_y], esi
 .scan_fail:
-	pop r12
+	add rsp, 8
+	pop r13
 	pop rbx
+	pop r12
 	ret
 
 ;================================================================

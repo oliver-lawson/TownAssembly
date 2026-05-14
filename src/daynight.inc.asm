@@ -317,6 +317,13 @@ torch_build_occluder_list:
 	jz .b_next_col		; empty
 	cmp eax, TILE_TORCH
 	je .b_next_col		; other torches don't occlude
+	; treat anything you can walk through as transparent to light.
+	; speed_table[tile_id] == 100 -> open doors, chairs, etc.  this
+	; reuses the movement table so we don't keep two truths in sync
+	lea rdx, [tile_speed_table]
+	movzx edx, byte [rdx + rax]
+	cmp edx, 100
+	je .b_next_col
 
 	; capacity check
 	mov edx, [torch_occ_count]
@@ -1522,13 +1529,32 @@ torch_flicker_intensity:
 ; then applies the combined tint/glow pass over the framebuffer
 ;================================================================
 daynight_draw_all_torches:
+	call daynight_get_darkness
+	test eax, eax
+	jz .t_done
+
+	; build the lightmap, then apply the final tint
+	call lightmap_build
+	call daynight_apply_tint
+.t_done:
+	ret
+
+;================================================================
+; lightmap_build: clear the lightmap then stamp every visible
+; torch into it, with shadows.  no tint - just the lit-pixel mask
+;----------------------------------------------------------------
+; broken out from daynight_draw_all_torches so the safezone debug
+; overlay can populate the lightmap regardless of time-of-day
+; (the tint pass still gates on darkness)
+;================================================================
+lightmap_build:
 	push rbp
 	push rbx
 	push r12
 	push r13
 	push r14
 	push r15
-	mov rbp, rsp
+	mov rbp, rsp	; rbp AFTER pushes so locals don't overlap saved regs
 	sub rsp, 48		; named locals for the inner loop:
 					; [rbp-8]  = tile_x of current torch
 					; [rbp-16] = tile_y
@@ -1536,10 +1562,6 @@ daynight_draw_all_torches:
 					; [rbp-32] = torch screen cy
 					; [rbp-40] = flicker
 					; 48 keeps stack 16-aligned
-
-	call daynight_get_darkness
-	test eax, eax
-	jz .t_done
 
 	; clear and build the lightmap
 	call lightmap_clear
@@ -1679,11 +1701,6 @@ daynight_draw_all_torches:
 	inc ebx
 	jmp .t_row
 .t_stamp_done:
-
-	; now apply final lightmap tint!
-	call daynight_apply_tint
-
-.t_done:
 	add rsp, 48
 	pop r15
 	pop r14
