@@ -272,7 +272,7 @@ try_player_action:
 	mov esi, r12d
 	call door_toggle_at
 	test eax, eax
-	jnz .out
+	jnz .out_changed
 
 	; --- look for npc entity in that tile ---
 	; scan all alive non-player entities; first whose centre lies in
@@ -355,7 +355,7 @@ try_player_action:
 	inc word [player_res_wood]
 	lea rdi, [floattext_wood]
 	call spawn_floattext
-	jmp .out
+	jmp .out_changed
 
 .got_stone:
 	; chop stone wall: ground -> dirt, object cleared
@@ -369,6 +369,12 @@ try_player_action:
 	inc word [player_res_stone]
 	lea rdi, [floattext_stone]
 	call spawn_floattext
+	; fallthrough to .out_changed
+
+.out_changed:
+	; an occluder or light source moved/changed - rebuild the mask
+	call safezone_recompute
+	; fallthrough to .out
 
 .out:
 	pop r15

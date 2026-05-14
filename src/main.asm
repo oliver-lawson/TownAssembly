@@ -8,8 +8,6 @@ default rel
 %include "blit.inc.asm"
 %include "autotile.inc.asm"
 %include "tilemap.inc.asm"
-%define SPRITE_SIZE			16
-%define SPRITE_COLOR_KEY	0xFFFF00FF
 %include "entity.inc.asm"
 %include "shadow.inc.asm"
 %include "entity_player.inc.asm"
@@ -21,6 +19,7 @@ default rel
 %include "hud.inc.asm"
 %include "camera.inc.asm"
 %include "fps.inc.asm"
+%include "safezone.inc.asm"
 %include "input.inc.asm"
 
 section .data
@@ -42,7 +41,7 @@ section .data
 	hud_label_fps		db "fps", 0
 	hud_label_iters		db "iters", 0
 	hud_label_seed		db "seed", 0
-	hud_help			db "` console F3 hud F5 restart i inv 1-5 hotbar", 0
+	hud_help			db "` console F3 hud F5 restart F6 safezone i inv 1-5 hotbar", 0
 
 	; log messages
 	log_msg_started		db 0x1, " world generated! ", 0x3, 0
@@ -112,6 +111,7 @@ main:
 	call setup_world_entities	; place NPCs
 	call inv_init				; set up inventory
 	call daynight_reset
+	call safezone_recompute		; initial mask (no torches yet, all dark)
 
 	; CHEAT: give starting items so I don't have to keep crafting..
 	mov word [inv_item_count + ITEM_TORCH * 2], 12
@@ -295,6 +295,11 @@ main:
 	; day/night
 	call daynight_apply_tint
 	call daynight_draw_all_torches
+
+	; safezone debug overlay (F6) - tints dark tiles.  drawn after
+	; daynight so it reads correctly against any tinted world, but
+	; before HUD so it doesn't bleed under the UI
+	call safezone_draw_debug
 
 	; bottom HUD bar
 	call draw_hud_bar
@@ -530,6 +535,7 @@ restart_world:
 	; counts.  resources get re-init by setup_world_entities
 	call inv_full_reset
 	call daynight_reset
+	call safezone_recompute		; mask is fresh after regen
 	lea rdi, [log_msg_restart]
 	call debug_log
 	pop rbp
