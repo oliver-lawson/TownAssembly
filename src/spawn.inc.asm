@@ -17,11 +17,11 @@
 %ifndef SPAWN_INC
 %define SPAWN_INC
 
-%define MONSTER_CAP				32
+%define MONSTER_CAP				64
 %define HERO_CAP				8
-%define SPAWN_TICK_PERIOD		60;120
+%define SPAWN_TICK_PERIOD		40;120
 %define SPAWN_RETRIES			16	; per attempt
-%define SPAWN_NO_SPAWN_RADIUS	4	; tiles from player
+%define SPAWN_NO_SPAWN_RADIUS	6	; tiles from player
 
 ; sprite base slots (must match what setup_world_entities used)
 %define HERO_SPRITE_BASE		4
@@ -188,6 +188,10 @@ try_spawn_in_zone:
 	call entity_spawn
 	cmp eax, 0
 	jl .fail
+
+	; randomise stats for this new npc
+	mov edi, eax
+	call entity_roll_random_stats
 
 	add rsp, 16
 	pop r13

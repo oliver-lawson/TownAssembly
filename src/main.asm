@@ -9,6 +9,7 @@ default rel
 %include "autotile.inc.asm"
 %include "tilemap.inc.asm"
 %include "entity.inc.asm"
+%include "ai.inc.asm"
 %include "shadow.inc.asm"
 %include "entity_player.inc.asm"
 %include "daynight.inc.asm"

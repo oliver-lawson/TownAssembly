@@ -811,6 +811,7 @@ draw_entities:
 	sub esi, SPRITE_SIZE / 2	; sprite top
 	sub esi, 4					; 4px above sprite
 	movzx edx, byte [r13 + ENT_HP_OFFSET]
+	movzx ecx, byte [r13 + ENT_HP_MAX_OFFSET]
 	call draw_hp_bar
 
 .skip:
@@ -831,33 +832,41 @@ draw_entities:
 ;----------------------------------------------------------------
 ; bar is HP_BAR_WIDTH x HP_BAR_HEIGHT, centred horizontally on the
 ; entity, with screen y = top of the bar.  red bg = full width,
-; green fg = width * hp / DEFAULT_HP_MAX.  no-op at full HP and
+; green fg = width * hp / hp_max.  no-op at full HP and
 ; dead (caller filters any dead..full HP we just always show atm)
 ;----------------------------------------------------------------
 ; in:	edi = screen cx (entity centre x in screen px)
 ;		esi = screen y top of bar
-;		edx = current hp (0..DEFAULT_HP_MAX)
+;		edx = current hp
+;		ecx = hp_max
 ;================================================================
 %define HP_BAR_WIDTH		14
 %define HP_BAR_HEIGHT		2
-%define DEFAULT_HP_MAX		10
 
 draw_hp_bar:
 	push rbx
 	push r12
 	push r13
-	; 3 pushes (24) + ret (8) = 32 = 16-aligned, no locals needed
+	push r14
+	; 4 pushes (32) + ret (8) = 40 - misaligned, fix with sub 8
+	sub rsp, 8
 
-	; clamp hp to [0, MAX]
+	; clamp hp to [0, hp_max]
 	test edx, edx
 	jns .hp_lo_ok
 	xor edx, edx
 .hp_lo_ok:
-	cmp edx, DEFAULT_HP_MAX
+	cmp edx, ecx
 	jle .hp_hi_ok
-	mov edx, DEFAULT_HP_MAX
+	mov edx, ecx
 .hp_hi_ok:
+	; guard against hp_max = 0 (would divide-by-zero)
+	test ecx, ecx
+	jnz .hpmax_ok
+	mov ecx, 1
+.hpmax_ok:
 	mov r12d, edx				; r12 = hp
+	mov r14d, ecx				; r14 = hp_max
 
 	; top-left of bar
 	sub edi, HP_BAR_WIDTH / 2
@@ -887,11 +896,11 @@ draw_hp_bar:
 	call fill_rect				; nice to get reuse of this!
 
 	; --- fg (green) for the current fraction ---
-	; fg_w = HP_BAR_WIDTH * hp / DEFAULT_HP_MAX
+	; fg_w = HP_BAR_WIDTH * hp / hp_max
 	mov eax, HP_BAR_WIDTH
 	imul eax, r12d
 	cdq
-	mov ecx, DEFAULT_HP_MAX
+	mov ecx, r14d
 	idiv ecx
 	test eax, eax
 	jle .out					; nothing to draw if 0 wide
@@ -900,10 +909,12 @@ draw_hp_bar:
 	mov esi, r13d
 	mov edx, eax				; fg width
 	mov ecx, HP_BAR_HEIGHT
-	mov r8d, 0xFF30D040			; bright green
+	mov r8d, 0xFF00FF00			; bright green
 	call fill_rect
 
 .out:
+	add rsp, 8
+	pop r14
 	pop r13
 	pop r12
 	pop rbx

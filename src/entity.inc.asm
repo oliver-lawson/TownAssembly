@@ -49,16 +49,33 @@
 %define ENT_TIMER_OFFSET	12
 %define ENT_FLAGS_OFFSET	13
 %define ENT_HP_OFFSET		14
+%define ENT_HP_MAX_OFFSET	15
 %define ENT_AI_DIR_OFFSET	16
+%define ENT_AI_MODE_OFFSET	17
 %define ENT_AI_TICKS_OFFSET	18
 %define ENT_AI_ACCUM_OFFSET	20
+%define ENT_AI_TARGET_OFFSET	24
+%define ENT_BRAVERY_OFFSET	25
+%define ENT_SPEED_OFFSET	26
+%define ENT_DECISION_TICKS_OFFSET	27
+%define ENT_ATTACK_TICKS_OFFSET		28
 
-; wander direction values
+; wander direction values (also used as flee/engage direction)
 %define AI_DIR_IDLE			0
 %define AI_DIR_UP			1
 %define AI_DIR_DOWN			2
 %define AI_DIR_LEFT			3
 %define AI_DIR_RIGHT		4
+
+; AI macro states
+%define AI_MODE_IDLE		0
+%define AI_MODE_WANDER		1
+%define AI_MODE_ENGAGING	2	; walking toward target
+%define AI_MODE_FIGHTING	3	; adjacent + attacking
+%define AI_MODE_FLEEING		4	; walking away from target
+
+; sentinel for "no target"
+%define AI_TARGET_NONE		0xFF
 
 ; flag bits
 %define ENT_FLAG_ALIVE		0x01
@@ -158,9 +175,18 @@ entity_spawn:
 	mov byte [rax + ENT_PHASE_OFFSET], 0
 	mov byte [rax + ENT_TIMER_OFFSET], 0
 	mov byte [rax + ENT_FLAGS_OFFSET], ENT_FLAG_ALIVE
-	mov byte [rax + ENT_HP_OFFSET], 10 ;default,callers can overwrite
-	mov dword [rax + 16], 0			   ; ai_state TMP
-	mov dword [rax + 20], 0			   ; ai_data  TMP
+	; default stats - spawn caller can overwrite for per-npc variance
+	mov byte [rax + ENT_HP_OFFSET], 10
+	mov byte [rax + ENT_HP_MAX_OFFSET], 10
+	mov byte [rax + ENT_AI_DIR_OFFSET], AI_DIR_IDLE
+	mov byte [rax + ENT_AI_MODE_OFFSET], AI_MODE_WANDER
+	mov word [rax + ENT_AI_TICKS_OFFSET], 0
+	mov dword [rax + ENT_AI_ACCUM_OFFSET], 0
+	mov byte [rax + ENT_AI_TARGET_OFFSET], AI_TARGET_NONE
+	mov byte [rax + ENT_BRAVERY_OFFSET], 128
+	mov byte [rax + ENT_SPEED_OFFSET], 100
+	mov byte [rax + ENT_DECISION_TICKS_OFFSET], 0
+	mov byte [rax + ENT_ATTACK_TICKS_OFFSET], 0
 
 	; bump entity_count if we extended past it
 	mov eax, [entity_count]
@@ -193,6 +219,46 @@ entity_spawn:
 entity_kill:
 	call entity_ptr
 	mov byte [rax + ENT_FLAGS_OFFSET], 0
+	ret
+
+;================================================================
+; entity_roll_random_stats: roll random stats for uniquer npcs
+;----------------------------------------------------------------
+; ranges:
+;	hp_max  8..14   (also sets hp = hp_max)
+;	bravery 30..220
+;	speed   60..140 percent
+;----------------------------------------------------------------
+; in:	edi = entity index
+;================================================================
+entity_roll_random_stats:
+	push rbx
+	push r12
+	mov r12d, edi
+	call entity_ptr
+	mov rbx, rax
+
+	; hp_max = 8 + rng(7)  -> 8..14
+	mov edi, 7
+	call rng_range
+	add eax, 8
+	mov byte [rbx + ENT_HP_MAX_OFFSET], al
+	mov byte [rbx + ENT_HP_OFFSET], al
+
+	; bravery = 30 + rng(191) -> 30..220
+	mov edi, 191
+	call rng_range
+	add eax, 30
+	mov byte [rbx + ENT_BRAVERY_OFFSET], al
+
+	; speed = 60 + rng(81) -> 60..140
+	mov edi, 81
+	call rng_range
+	add eax, 60
+	mov byte [rbx + ENT_SPEED_OFFSET], al
+
+	pop r12
+	pop rbx
 	ret
 
 
@@ -315,6 +381,18 @@ entity_try_move:
 	call tile_speed_at_pixel
 	test eax, eax
 	jz .blocked
+
+	; combine with entity-specific speed.  both are percentages, so:
+	;	combined = tile% * entity% / 100
+	; aka on water(50%) at sspeed 50%: 25%. on grass with 100%? 100%.
+	movzx ecx, byte [r15 + ENT_SPEED_OFFSET]
+	imul eax, ecx
+	mov ecx, 100
+	xor edx, edx
+	div ecx						; eax = combined %
+
+	test eax, eax
+	jz .blocked					; 0% combined -> treat as block
 
 	; accumulate
 	add [r15 + ENT_AI_ACCUM_OFFSET], eax
@@ -581,7 +659,7 @@ entity_tick_all:
 	test eax, ENT_FLAG_ALIVE
 	jz .skip
 
-	; dispatch by type (atm every npc just wanders)
+	; dispatch by type (player skipped, AI runs for hero/monster)
 	movzx eax, byte [r13 + ENT_TYPE_OFFSET]
 	cmp eax, ENT_TYPE_PLAYER
 	je .skip
@@ -589,7 +667,7 @@ entity_tick_all:
 	je .skip
 
 	mov edi, ebx
-	call entity_wander_tick
+	call ai_tick
 
 .skip:
 	inc ebx
