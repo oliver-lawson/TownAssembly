@@ -864,6 +864,20 @@ draw_hp_bar:
 	mov ebx, edi				; ebx = bar x
 	mov r13d, esi				; r13 = bar y
 
+	; --- outline ---
+	; one fill_rect 1px larger on all sides; the red/green pass
+	; below overwrites the interior, leaving a 1px white border
+	; hm, first time that large pixels look crappy here, used to
+	; very thin outlines on these things in RTSes
+	mov edi, ebx
+	dec edi
+	mov esi, r13d
+	dec esi
+	mov edx, HP_BAR_WIDTH + 2
+	mov ecx, HP_BAR_HEIGHT + 2
+	mov r8d, 0x44FFFFFF ; lower opacity seems to look better
+	call fill_rect
+
 	; --- bg (red) for the full width ---
 	mov edi, ebx
 	mov esi, r13d
