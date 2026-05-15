@@ -639,6 +639,15 @@ tree_regrowth_tick:
 	add eax, ebx
 	lea rcx, [objectmap]
 	mov byte [rcx + rax], OBJ_TREE
+	; a tree is both an occluder and a wall - rebuild the lazy
+	; world-state masks so the new obstacle is visible to spawn rules
+	; and to npc routing this same frame.
+	; rsp is misaligned by 8 here (2 callee-saves + ret = 24) so we
+	; sub 8 to align for the heavy recompute calls
+	sub rsp, 8
+	call safezone_recompute
+	call pathing_recompute
+	add rsp, 8
 	jmp .out
 
 .save_only:
