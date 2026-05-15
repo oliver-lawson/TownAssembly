@@ -151,8 +151,14 @@ entity_spawn:
 	mov r14d, edx	; y
 	mov r15d, ecx	; slot
 
-	; scan for first dead slot
-	xor ebx, ebx
+	; scan for first dead slot.  skip slot 0 - that's the player's
+	; reserved slot. if the player dies their slot is briefly flagged
+	; dead, but player_die_and_respawn flips it back the same frame.
+	; scanning from 1 means a spawn that races the death handler will
+	; never accidentally clobber the player
+	; found the hard way - this was a fun one, as npcs were in our
+	; player's place but still trying to move about while we moved
+	mov ebx, 1
 .scan:
 	cmp ebx, ENT_MAX
 	jge .full
@@ -519,11 +525,50 @@ entity_wander_tick:
 	test eax, eax
 	jnz .have_dir
 
-	; pick new direction
+	; pick new direction.  read the hub flow field for "homeward
+	; drift": heroes mostly head home when not engaged, monsters
+	; occasionally drift toward the hub to threaten the village.
+	;l
+	; if the flow field has no dir for this tile (unreachable, or at
+	; the hub itself), fall through to a random pick
+	;
+	; chance is per-type:
+	;	hero	-> 70% flow field, 30% random
+	;	monster	-> 20% flow field, 80% random
+	;	other	-> 100% random TMP
+	mov edi, 100
+	call rng_range
+	; eax in [0, 100).  bias threshold depends on type
+	mov ecx, 0			; default: never use flow field
+	movzx edx, byte [r13 + ENT_TYPE_OFFSET]
+	cmp edx, ENT_TYPE_HERO
+	jne .not_hero_bias
+	mov ecx, 70
+	jmp .have_bias
+.not_hero_bias:
+	cmp edx, ENT_TYPE_MONSTER
+	jne .have_bias
+	mov ecx, 20
+.have_bias:
+	cmp eax, ecx
+	jge .pick_random	; rng above threshold -> random
+
+	; --- try flow field ---
+	; pixel coords -> tile coords, look up dir there
+	mov edi, [r13 + ENT_X_OFFSET]
+	mov esi, [r13 + ENT_Y_OFFSET]
+	call pathing_dir_at_pixel
+	test eax, eax
+	jz .pick_random		; AI_DIR_IDLE / unreachable -> random
+	mov byte [r13 + ENT_AI_DIR_OFFSET], al
+	jmp .pick_ticks
+
+.pick_random:
 	mov edi, 5
 	call rng_range
 	mov byte [r13 + ENT_AI_DIR_OFFSET], al
 
+.pick_ticks:
 	; ticks = 30 + rng_range(60) -> 30..89 frames at this direction
 	mov edi, 60
 	call rng_range

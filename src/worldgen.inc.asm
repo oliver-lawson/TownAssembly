@@ -67,7 +67,7 @@ generate_world:
 	xor r12d, r12d				; tile_index = 0
 .fill_loop:
 	cmp r12d, MAP_WIDTH * MAP_HEIGHT
-	jge .fill_done
+	jge .stamp_start
 
 	; convert linear index to (x, y) to check borders
 	mov eax, r12d
@@ -96,6 +96,42 @@ generate_world:
 	mov [rbx + r12], al
 	inc r12d
 	jmp .fill_loop
+
+	; --- step 1b: stamp a 3x3 floor patch at the map centre ---
+	; gives the hub a guaranteed seed of open ground.  the CA pass
+	; below will smooth around it, eroding edges sometimes but the
+	; centre cell of a 3x3 of floor has 8 floor neighbours so always
+	; survives the >=5-walls-becomes-wall rule.  doing this BEFORE
+	; CA so the result feels natural rather than stamped on
+.stamp_start:
+	mov r12d, MAP_HEIGHT
+	shr r12d, 1					; cy
+	dec r12d					; start one row up
+	mov r13d, 3					; rows to write
+.stamp_row:
+	test r13d, r13d
+	jz .fill_done
+	mov r14d, MAP_WIDTH
+	shr r14d, 1					; cx
+	dec r14d					; start one col left
+	mov r15d, 3					; cols this row
+.stamp_col:
+	test r15d, r15d
+	jz .stamp_row_next
+
+	mov eax, r12d
+	imul eax, MAP_WIDTH
+	add eax, r14d
+	lea rbx, [tilemap]
+	mov byte [rbx + rax], CA_FLOOR
+
+	inc r14d
+	dec r15d
+	jmp .stamp_col
+.stamp_row_next:
+	inc r12d
+	dec r13d
+	jmp .stamp_row
 
 	; --- step 2: run CA iterations to smooth the noise ---
 .fill_done:
@@ -237,6 +273,67 @@ generate_world:
 	inc r13d
 	jmp .water_y
 .water_done:
+
+	; --- step 5: dress the hub - 3x3 wood floor + a torch ---
+	; the CA-stamped 3x3 floor at the centre survives as grass/dirt,
+	; which is functional but doesn't read as "this is the safe hub".
+	; overwrite those 9 cells with wood floor (and clear any object
+	; so nothing's blocking spawn) so the player has a visible base.
+	; one torch goes to the left-of-centre cell to light the area
+	mov r12d, MAP_HEIGHT
+	shr r12d, 1
+	dec r12d					; ty walker start = cy - 1
+	mov r13d, 3					; rows left
+.hub_row:
+	test r13d, r13d
+	jz .hub_torch
+	mov r14d, MAP_WIDTH
+	shr r14d, 1
+	dec r14d					; tx walker start = cx - 1
+	mov r15d, 3					; cols left this row
+.hub_col:
+	test r15d, r15d
+	jz .hub_row_next
+
+	mov eax, r12d
+	imul eax, MAP_WIDTH
+	add eax, r14d
+	; tilemap = TILE_WOOD_FLOOR
+	lea rbx, [tilemap]
+	mov byte [rbx + rax], TILE_WOOD_FLOOR
+	; objectmap = OBJ_NONE: clear any tree etc that might have landed
+	lea rbx, [objectmap]
+	mov byte [rbx + rax], OBJ_NONE
+
+	inc r14d
+	dec r15d
+	jmp .hub_col
+.hub_row_next:
+	inc r12d
+	dec r13d
+	jmp .hub_row
+
+.hub_torch:
+	; torch at (cx - 1, cy) - left-of-centre cell of the patch
+	mov r12d, MAP_HEIGHT
+	shr r12d, 1					; cy
+	mov r14d, MAP_WIDTH
+	shr r14d, 1
+	dec r14d					; cx - 1
+	mov eax, r12d
+	imul eax, MAP_WIDTH
+	add eax, r14d
+	lea rbx, [objectmap]
+	mov byte [rbx + rax], OBJ_TORCH
+	; roll a stable variant byte for the torch as the placement code
+	; does,so any per-variant animation stays consistent across regen
+	; probably overkill..
+	push rax
+	call rng_next
+	pop rcx
+	lea rbx, [object_variant]
+	mov byte [rbx + rcx], al
+
 	pop r15
 	pop r14
 	pop r13

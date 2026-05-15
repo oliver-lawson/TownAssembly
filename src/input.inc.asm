@@ -28,6 +28,7 @@ section .bss
 	key_inv_pressed		resb 1
 	key_close_pressed	resb 1
 	key_safezone_pressed	resb 1	; F6: toggle safezone debug overlay
+	key_pathing_pressed		resb 1	; F7: toggle flow-field debug overlay
 	; hotbar select: 0 means nothing pressed, otherwise the digit
 	; pressed (1..N).  cleared after consumed
 	key_hotbar_digit	resb 1
@@ -102,6 +103,8 @@ process_sdl_events:
 	je .key_f5
 	cmp eax, SCANCODE_F6
 	je .key_f6
+	cmp eax, SCANCODE_F7
+	je .key_f7
 	cmp eax, SCANCODE_E
 	je .key_e
 	cmp eax, SCANCODE_I
@@ -132,6 +135,9 @@ process_sdl_events:
 	jmp .poll
 .key_f6:
 	mov byte [key_safezone_pressed], 1
+	jmp .poll
+.key_f7:
+	mov byte [key_pathing_pressed], 1
 	jmp .poll
 .key_e:
 	mov byte [key_action_pressed], 1
@@ -224,6 +230,13 @@ dispatch_input:
 	mov byte [key_safezone_pressed], 0
 	call safezone_toggle_debug
 .no_safezone:
+
+	; --- F7: toggle flow-field debug overlay ---
+	cmp byte [key_pathing_pressed], 0
+	je .no_pathing
+	mov byte [key_pathing_pressed], 0
+	call pathing_toggle_debug
+.no_pathing:
 
 	; --- I: toggle inventory screen ---
 	; handled before action to avoid clash

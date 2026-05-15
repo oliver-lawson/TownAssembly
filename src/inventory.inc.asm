@@ -1717,8 +1717,9 @@ place_at_mouse:
 	mov byte [place_item], ITEM_NONE
 .placed:
 	; the placement may have changed lights or occluders -
-	; rebuild the gameplay safezone mask
+	; rebuild the gameplay safezone mask and the hub flow field
 	call safezone_recompute
+	call pathing_recompute
 	mov eax, 1
 	pop r12
 	pop rbx

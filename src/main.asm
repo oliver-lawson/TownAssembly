@@ -21,6 +21,7 @@ default rel
 %include "camera.inc.asm"
 %include "fps.inc.asm"
 %include "safezone.inc.asm"
+%include "pathing.inc.asm"
 %include "spawn.inc.asm"
 %include "input.inc.asm"
 
@@ -43,7 +44,7 @@ section .data
 	hud_label_fps		db "fps", 0
 	hud_label_iters		db "iters", 0
 	hud_label_seed		db "seed", 0
-	hud_help			db "` console F3 hud F5 restart F6 safezone i inv 1-5 hotbar", 0
+	hud_help			db "` console F3 hud F5 restart F6 safezone F7 flowmap i inv 1-5 hotbar", 0
 
 	; log messages
 	log_msg_started		db 0x1, " world generated! ", 0x3, 0
@@ -107,13 +108,20 @@ main:
 	mov [current_seed], eax		; store for HUD
 	call generate_world
 
-	; player init
-	call place_player_on_floor
+	; hub is the carved 3x3 at map centre - init it before placing
+	; the player so the player can spawn there directly
+	call pathing_init_default_hub
+
+	; player init - spawn at the hub.  place_player_on_floor is kept
+	; around for fallback use (eg if we later want random starts)
+	;call place_player_on_floor
+	call place_player_at_hub
 	mov byte [player_moved], 0
 	call setup_world_entities	; place NPCs
 	call inv_init				; set up inventory
 	call daynight_reset
-	call safezone_recompute		; initial mask (no torches yet, all dark)
+	call safezone_recompute		; initial mask
+	call pathing_recompute		; flow field from the hub outward
 	call spawn_reset
 
 	; CHEAT: give starting items so I don't have to keep crafting..
@@ -244,6 +252,10 @@ main:
 	; tick all non-player entities
 	call entity_tick_all
 
+	; pull entity[0] back into player_* - mirrors any AI damage dealt
+	; this frame.  if we died, this triggers respawn at the hub
+	call sync_entity_to_player
+
 	; resolve overlaps between entities (radial pushback)
 	call entity_resolve_collisions
 
@@ -307,6 +319,10 @@ main:
 	; daynight so it reads correctly against any tinted world, but
 	; before HUD so it doesn't bleed under the UI
 	call safezone_draw_debug
+
+	; flow-field debug overlay (F7) - per-tile arrow toward hub +
+	; a marker on the hub itself.  same placement reasoning
+	call pathing_draw_debug
 
 	; bottom HUD bar
 	call draw_hud_bar
@@ -533,8 +549,10 @@ restart_world:
 	mov [current_seed], eax
 	call generate_world
 	call entity_clear_all
-	; re-init player
-	call place_player_on_floor
+	; hub init must happen before placing the player so we can spawn
+	; them on it.  place_player_on_floor is kept around for fallback
+	call pathing_init_default_hub
+	call place_player_at_hub
 	mov byte [player_moved], 0
 	; + reset NPCs
 	call setup_world_entities
@@ -543,6 +561,7 @@ restart_world:
 	call inv_full_reset
 	call daynight_reset
 	call safezone_recompute		; mask is fresh after regen
+	call pathing_recompute
 	call spawn_reset
 	lea rdi, [log_msg_restart]
 	call debug_log

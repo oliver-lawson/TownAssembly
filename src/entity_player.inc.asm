@@ -413,8 +413,10 @@ try_player_action:
 	; fallthrough to .out_changed
 
 .out_changed:
-	; an occluder or light source moved/changed - rebuild the mask
+	; an occluder or light source moved/changed - rebuild the
+	; gameplay safezone mask and the hub flow field
 	call safezone_recompute
+	call pathing_recompute
 	; fallthrough to .out
 
 .out:
@@ -523,6 +525,26 @@ floattext_draw:
 	ret
 
 ;================================================================
+; place_player_at_hub: drop the player on the hub tile centre
+;----------------------------------------------------------------
+; worldgen carves a 3x3 wood-floor patch at the map centre and the
+; hub is pinned there at world regen by pathing_init_default_hub.
+; no walkability check needed - the carve guarantees it.  this is
+; the default spawn point.  place_player_on_floor stays around for
+; future "random start" or fallback use
+;================================================================
+place_player_at_hub:
+	mov eax, [hub_tx]
+	imul eax, TILE_SIZE
+	add eax, TILE_SIZE/2
+	mov [player_x], eax
+	mov eax, [hub_ty]
+	imul eax, TILE_SIZE
+	add eax, TILE_SIZE/2
+	mov [player_y], eax
+	ret
+
+;================================================================
 ; place_player_on_floor: pick a random fully-walkable tile and
 ; put the player at its centre.  uses tile_speed_at_pixel so the
 ; object overlay (trees, walls, etc) is rejected too, not just
@@ -619,6 +641,10 @@ place_player_on_floor:
 ;----------------------------------------------------------------
 ; we keep player_* as source of truth for input + HUD; the entity
 ; table mirrors it so it gets y-sorted with everyone else
+;
+; we also push player_hp/hp_max into the entity slot so AI attacks
+; (which damage the entity hp byte) actually hit the player.  the
+; reverse sync happens in sync_entity_to_player after AI ticks
 ;================================================================
 sync_player_to_entity:
 	xor edi, edi
@@ -631,6 +657,155 @@ sync_player_to_entity:
 	mov byte [rax + ENT_FACING_OFFSET], dil
 	mov edi, [player_anim_phase]
 	mov byte [rax + ENT_PHASE_OFFSET], dil
+	; hp + hp_max: clamp to byte before writing.  player hp is u16
+	; (so the /set console can crank it to thousands) but the entity
+	; field is u8.  cap at 255 - past that AI attacks taking 2-3 hp
+	; per swing are irrelevant anyway
+	movzx edi, word [player_hp]
+	cmp edi, 255
+	jle .hp_ok
+	mov edi, 255
+.hp_ok:
+	mov byte [rax + ENT_HP_OFFSET], dil
+	movzx edi, word [player_hp_max]
+	cmp edi, 255
+	jle .hpmax_ok
+	mov edi, 255
+.hpmax_ok:
+	mov byte [rax + ENT_HP_MAX_OFFSET], dil
+	ret
+
+;================================================================
+; sync_entity_to_player: pull damage taken back out of entity[0]
+;----------------------------------------------------------------
+; called once after entity_tick_all.  AI attacks drain the entity
+; hp byte; we mirror it back into player_hp.  if the player's
+; entity got flagged dead, trigger player_die_and_respawn so the
+; slot is restored before any spawn could reclaim it
+;================================================================
+sync_entity_to_player:
+	push rbp
+	mov rbp, rsp
+	xor edi, edi
+	call entity_ptr 	; rax = &entity[0]
+
+	; copy hp back.  AI damage is sat-to-zero (see ai_attack_tick) so
+	; this is always in [0, hp_max]
+	movzx ecx, byte [rax + ENT_HP_OFFSET]
+	mov word [player_hp], cx
+
+	; flagged dead?
+	movzx ecx, byte [rax + ENT_FLAGS_OFFSET]
+	test ecx, ENT_FLAG_ALIVE
+	jnz .out
+	call player_die_and_respawn
+.out:
+	pop rbp
+	ret
+
+;================================================================
+; player_die_and_respawn
+;----------------------------------------------------------------
+; wake up at "hub", lose a chunk of carried lose half our resources
+;
+; hp resets to half max so we're not insta-killed on respawn, will
+; add hp regen later.
+;----------------------------------------------------------------
+; resets entity[0]'s alive flag, clears any targeting that NPCs had
+; on us so they wander off, and logs a status line
+;================================================================
+section .data
+	log_msg_player_died	db "you awake at the hub, poorer.", 0
+section .text
+
+player_die_and_respawn:
+	push rbp
+	mov rbp, rsp
+
+	; --- halve resources ---
+	mov ax, [player_res_wood]
+	shr ax, 1
+	mov [player_res_wood], ax
+	mov ax, [player_res_stone]
+	shr ax, 1
+	mov [player_res_stone], ax
+	mov ax, [player_res_food]
+	shr ax, 1
+	mov [player_res_food], ax
+	mov ax, [player_res_gold]
+	shr ax, 1
+	mov [player_res_gold], ax
+
+	; --- restore hp to half max (at least 1) ---
+	mov ax, [player_hp_max]
+	shr ax, 1
+	test ax, ax
+	jnz .hp_ok
+	mov ax, 1
+.hp_ok:
+	mov [player_hp], ax
+
+	; --- teleport to hub tile centre ---
+	mov eax, [hub_tx]
+	imul eax, TILE_SIZE
+	add eax, TILE_SIZE/2
+	mov [player_x], eax
+	mov eax, [hub_ty]
+	imul eax, TILE_SIZE
+	add eax, TILE_SIZE/2
+	mov [player_y], eax
+
+	; --- restore entity[0]: alive flag, hp/hp_max, clear targets ---
+	xor edi, edi
+	call entity_ptr			; rax = &entity[0]
+	mov byte [rax + ENT_FLAGS_OFFSET], ENT_FLAG_ALIVE
+	movzx ecx, word [player_hp]
+	mov byte [rax + ENT_HP_OFFSET], cl
+	movzx ecx, word [player_hp_max]
+	cmp ecx, 255
+	jle .ehpmax_ok
+	mov ecx, 255
+.ehpmax_ok:
+	mov byte [rax + ENT_HP_MAX_OFFSET], cl
+	; mirror the teleport into entity[0] right away so we don't appear
+	; at the death spot for the rest of this frame's render
+	mov ecx, [player_x]
+	mov [rax + ENT_X_OFFSET], ecx
+	mov ecx, [player_y]
+	mov [rax + ENT_Y_OFFSET], ecx
+
+	; --- clear any NPC targets that were on us ---
+	; if a monster was chasing/fighting us, drop them back to wander
+	; otherwise they'd be spawncamping us
+	push rbx
+	sub rsp, 8	; align for inner calls
+	xor ebx, ebx
+.npc_loop:
+	mov ecx, [entity_count]
+	cmp ebx, ecx
+	jge .npc_done
+	; skip self (slot 0)
+	test ebx, ebx
+	jz .npc_next
+	mov edi, ebx
+	call entity_ptr
+	movzx ecx, byte [rax + ENT_AI_TARGET_OFFSET]
+	cmp ecx, 0		; target = player slot 0?
+	jne .npc_next
+	mov byte [rax + ENT_AI_TARGET_OFFSET], AI_TARGET_NONE
+	mov byte [rax + ENT_AI_MODE_OFFSET], AI_MODE_WANDER
+	mov byte [rax + ENT_DECISION_TICKS_OFFSET], 0
+.npc_next:
+	inc ebx
+	jmp .npc_loop
+.npc_done:
+	add rsp, 8
+	pop rbx
+
+	lea rdi, [log_msg_player_died]
+	call debug_log
+
+	pop rbp
 	ret
 
 ;================================================================
@@ -646,12 +821,39 @@ setup_world_entities:
 	mov rbp, rsp
 	call entity_clear_all
 
-	; player at i=0, default down facing
-	mov edi, ENT_TYPE_PLAYER
-	mov esi, [player_x]
-	mov edx, [player_y]
-	mov ecx, 0 			; sprite slot 0 (down-facing)
-	call entity_spawn
+	; player goes at slot 0 directly.  entity_spawn skips slot 0
+	; (reserved for the player) so we can't route through it; we'd
+	; end up at slot 1 instead.  hand-fill the same fields entity_spawn
+	; would, plus bump entity_count past us
+	xor edi, edi
+	call entity_ptr			; rax = &entity[0]
+	mov edi, [player_x]
+	mov [rax + ENT_X_OFFSET], edi
+	mov edi, [player_y]
+	mov [rax + ENT_Y_OFFSET], edi
+	mov byte [rax + ENT_TYPE_OFFSET], ENT_TYPE_PLAYER
+	mov byte [rax + ENT_FACING_OFFSET], 0
+	mov byte [rax + ENT_SLOT_OFFSET], 0
+	mov byte [rax + ENT_PHASE_OFFSET], 0
+	mov byte [rax + ENT_TIMER_OFFSET], 0
+	mov byte [rax + ENT_FLAGS_OFFSET], ENT_FLAG_ALIVE
+	mov byte [rax + ENT_HP_OFFSET], 10
+	mov byte [rax + ENT_HP_MAX_OFFSET], 10
+	mov byte [rax + ENT_AI_DIR_OFFSET], AI_DIR_IDLE
+	mov byte [rax + ENT_AI_MODE_OFFSET], AI_MODE_IDLE
+	mov word [rax + ENT_AI_TICKS_OFFSET], 0
+	mov dword [rax + ENT_AI_ACCUM_OFFSET], 0
+	mov byte [rax + ENT_AI_TARGET_OFFSET], AI_TARGET_NONE
+	mov byte [rax + ENT_BRAVERY_OFFSET], 128
+	mov byte [rax + ENT_SPEED_OFFSET], 100
+	mov byte [rax + ENT_DECISION_TICKS_OFFSET], 0
+	mov byte [rax + ENT_ATTACK_TICKS_OFFSET], 0
+	; make sure entity_count covers us
+	mov eax, [entity_count]
+	cmp eax, 1
+	jge .ec_ok
+	mov dword [entity_count], 1
+.ec_ok:
 
 	; reset anim/facing - new world, fresh start
 	mov dword [player_facing], FACE_DOWN

@@ -605,6 +605,41 @@ ai_move_in_dir:
 .ba_have:
 	mov edi, ebx
 	call entity_try_open_door_in_dir
+	test eax, eax
+	jnz .out_moved	; door swung - try moving next tick,
+					; counts as progress (no stuck)
+
+; --- perpendicular slide: cardinal step blocked, try sidestep ---
+	; trying something, not sure it works well
+	movzx eax, byte [r13 + ENT_AI_DIR_OFFSET]
+	cmp eax, AI_DIR_UP
+	je .perp_xaxis
+	cmp eax, AI_DIR_DOWN
+	je .perp_xaxis
+	; left/right blocked -> try y axis
+	mov esi, 0
+	mov edx, -ENGAGE_STEP			; up
+	mov edi, ebx
+	call entity_try_move
+	test eax, eax
+	jnz .out
+	mov esi, 0
+	mov edx, ENGAGE_STEP			; down
+	mov edi, ebx
+	call entity_try_move
+	jmp .out
+.perp_xaxis:
+	; up/down blocked -> try x axis
+	mov esi, -ENGAGE_STEP			; left
+	mov edx, 0
+	mov edi, ebx
+	call entity_try_move
+	test eax, eax
+	jnz .out
+	mov esi, ENGAGE_STEP			; right
+	mov edx, 0
+	mov edi, ebx
+	call entity_try_move
 	jmp .out
 
 .idle:
