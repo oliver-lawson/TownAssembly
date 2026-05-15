@@ -34,23 +34,28 @@
 ;	0..7   = torch flame frames (8-frame loop, drawn as object
 ;			 overlay with magenta key). cols 8..15 spare
 ;
-; rows 4..15 (GRASS band, 3 sets, each 4 rows):
-;	rows 4..7	: grass set 0  (blob pack + 16 variants)
-;	rows 8..11	: grass set 1
-;	rows 12..15	: grass set 2
+; row 4 (blood splatters):
+;	0..15  = 16 blood splatter variants, magenta-keyed.  drawn by
+;			 bloodmap.inc.asm; the count byte per tile picks how
+;			 many stack and the per-tile hash picks the start index
 ;
-; rows 16..27 (STONE band, 3 sets, same shape as grass)
+; rows 5..16 (GRASS band, 3 sets, each 4 rows):
+;	rows 5..8	: grass set 0  (blob pack + 16 variants)
+;	rows 9..12	: grass set 1
+;	rows 13..16	: grass set 2
 ;
-; rows 28..31 (WOOD WALL band, 1 set):
+; rows 17..28 (STONE band, 3 sets, same shape as grass)
+;
+; rows 29..32 (WOOD WALL band, 1 set):
 ;	standard 4-row set with blob pack + 16 variants
 ;
-; rows 32..47 (WATER band, 1 set with 4 animation frames):
-;	rows 32..35 : water frame 0  (blob pack + 16 variants)
-;	rows 36..39 : water frame 1
-;	rows 40..43 : water frame 2
-;	rows 44..47 : water frame 3
+; rows 33..48 (WATER band, 1 set with 4 animation frames):
+;	rows 33..36 : water frame 0  (blob pack + 16 variants)
+;	rows 37..40 : water frame 1
+;	rows 41..44 : water frame 2
+;	rows 45..48 : water frame 3
 ;
-; total: 48 rows * 16 cols = 768 slots, 256 x 768 px
+; total: 49 rows * 16 cols = 784 slots, 256 x 784 px
 
 %ifndef TILEMAP_INC
 %define TILEMAP_INC
@@ -130,27 +135,28 @@
 ; blob slots.  variants strip starts at set_base + 12 (col 12 of
 ; the same top row)/steps by 16 per row
 
-; grass band: rows 4..15, 3 sets stacked vertically (4 rows each)
-%define GRASS_BAND_ROW			4
+; grass band: rows 5..16, 3 sets stacked vertically (4 rows each).
+; shifted from 4 to 5 to make room for the 1x16 blood row at row 4
+%define GRASS_BAND_ROW			5
 %define ATLAS_GRASS_SET_0	(GRASS_BAND_ROW * ATLAS_COLS + 0)
 %define ATLAS_GRASS_SET_1	((GRASS_BAND_ROW + AUTOTILE_SET_ROWS) * ATLAS_COLS + 0)
 %define ATLAS_GRASS_SET_2	((GRASS_BAND_ROW + AUTOTILE_SET_ROWS*2) * ATLAS_COLS + 0)
 %define GRASS_SET_COUNT		3
 
-; stone band: rows 16..27, same shape as grass
-%define STONE_BAND_ROW			16
+; stone band: rows 17..28, same shape as grass
+%define STONE_BAND_ROW			17
 %define ATLAS_STONE_SET_0	(STONE_BAND_ROW * ATLAS_COLS + 0)
 %define ATLAS_STONE_SET_1	((STONE_BAND_ROW + AUTOTILE_SET_ROWS) * ATLAS_COLS + 0)
 %define ATLAS_STONE_SET_2	((STONE_BAND_ROW + AUTOTILE_SET_ROWS*2) * ATLAS_COLS + 0)
 %define STONE_SET_COUNT		3
 
-; wood wall band: rows 28..31, single set
-%define WOOD_WALL_BAND_ROW		28
+; wood wall band: rows 29..32, single set
+%define WOOD_WALL_BAND_ROW		29
 %define ATLAS_WOOD_WALL_SET_0	(WOOD_WALL_BAND_ROW * ATLAS_COLS + 0)
 %define WOOD_WALL_SET_COUNT		1
 
-; water band: rows 32..47, single set with 4 anim frames stacked
-%define WATER_BAND_ROW			32
+; water band: rows 33..48, single set with 4 anim frames stacked
+%define WATER_BAND_ROW			33
 %define ATLAS_WATER_F0			(WATER_BAND_ROW * ATLAS_COLS + 0)
 %define WATER_FRAME_COUNT		1
 %define WATER_ANIM_PERIOD		12

@@ -22,6 +22,7 @@ default rel
 %include "fps.inc.asm"
 %include "safezone.inc.asm"
 %include "pathing.inc.asm"
+%include "bloodmap.inc.asm"
 %include "spawn.inc.asm"
 %include "input.inc.asm"
 
@@ -122,6 +123,7 @@ main:
 	call daynight_reset
 	call safezone_recompute		; initial mask
 	call pathing_recompute		; flow field from the hub outward
+	call blood_clear			; no blood on a fresh world
 	call spawn_reset
 
 	; CHEAT: give starting items so I don't have to keep crafting..
@@ -300,6 +302,11 @@ main:
 	; the player/npcs render on top of furniture they're standing on
 	lea rdi, [atlas_tex]
 	call draw_objects
+
+	; blood splatters between objects and entities so blood sits on
+	; the ground/objects but underneath any entity standing on it
+	lea rdi, [atlas_tex]
+	call blood_draw_all
 
 	; entities (player + NPCs, y-sorted)
 	call draw_entities
@@ -562,6 +569,7 @@ restart_world:
 	call daynight_reset
 	call safezone_recompute		; mask is fresh after regen
 	call pathing_recompute
+	call blood_clear
 	call spawn_reset
 	lea rdi, [log_msg_restart]
 	call debug_log

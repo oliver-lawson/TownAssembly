@@ -18,8 +18,8 @@
 %define SPAWN_INC
 
 %define MONSTER_CAP				64
-%define HERO_CAP				8
-%define SPAWN_TICK_PERIOD		40;120
+%define HERO_CAP				32
+%define SPAWN_TICK_PERIOD		20;120
 %define SPAWN_RETRIES			16	; per attempt
 %define SPAWN_NO_SPAWN_RADIUS	6	; tiles from player
 
