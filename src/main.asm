@@ -20,6 +20,7 @@ default rel
 %include "camera.inc.asm"
 %include "fps.inc.asm"
 %include "safezone.inc.asm"
+%include "spawn.inc.asm"
 %include "input.inc.asm"
 
 section .data
@@ -112,6 +113,7 @@ main:
 	call inv_init				; set up inventory
 	call daynight_reset
 	call safezone_recompute		; initial mask (no torches yet, all dark)
+	call spawn_reset
 
 	; CHEAT: give starting items so I don't have to keep crafting..
 	mov word [inv_item_count + ITEM_TORCH * 2], 12
@@ -249,6 +251,10 @@ main:
 
 	; tree neighbour spread
 	call tree_regrowth_tick
+
+	; monster spawning - one attempt every SPAWN_TICK_PERIOD frames
+	; in dark tiles, capped at MONSTER_CAP alive
+	call spawn_tick
 
 	; advance the day/night clock
 	call daynight_tick
@@ -536,6 +542,7 @@ restart_world:
 	call inv_full_reset
 	call daynight_reset
 	call safezone_recompute		; mask is fresh after regen
+	call spawn_reset
 	lea rdi, [log_msg_restart]
 	call debug_log
 	pop rbp

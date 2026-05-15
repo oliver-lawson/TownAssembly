@@ -274,15 +274,28 @@ try_player_action:
 	test eax, eax
 	jnz .out_changed
 
-	; --- look for npc entity in that tile ---
-	; scan all alive non-player entities; first whose centre lies in
-	; the target tile wins.  tile bounds in px:
-	;	x0 = tx*16, x1 = x0+16
-	;	y0 = ty*16, y1 = y0+16
+	; --- look for an npc entity in front of the player ---
+	; build melee attack aabb:a 20x20 box centred on tile in front
+	; of the player.  any alive non-player entity whose 16x16 sprite
+	; aabb overlaps gets hit. bigger-than-tile attack reach means the
+	; player doesn't have to be pixel-perfect lined up with an npc
+	;
+	; melee attack aabb:
+	;	sx_lo = target_tx * TILE - SWING_EXTRA, sx_hi = +TILE+SWING_EXTRA
+	;	sy_lo = target_ty * TILE - SWING_EXTRA, sy_hi = +TILE+SWING_EXTRA
+	; entity aabb (16x16 sprite around centre):
+	;	ex_lo = ex - SPRITE_SIZE/2, ex_hi = ex + SPRITE_SIZE/2
+	;	ey_lo = ey - SPRITE_SIZE/2, ey_hi = ey + SPRITE_SIZE/2
+	; overlap iff sx_lo < ex_hi && ex_lo < sx_hi (same for y)
+	%define SWING_EXTRA		2
+
 	mov r13d, ebx
-	imul r13d, TILE_SIZE		; r13d = x0
+	imul r13d, TILE_SIZE
+	sub r13d, SWING_EXTRA		; r13d = swing sx_lo
 	mov r14d, r12d
-	imul r14d, TILE_SIZE		; r14d = y0
+	imul r14d, TILE_SIZE
+	sub r14d, SWING_EXTRA		; r14d = swing sy_lo
+	; we'll compute sx_hi and sy_hi on the fly: sx_lo + TILE + 2*EXTRA
 
 	xor r15d, r15d				; entity idx
 .scan:
@@ -301,28 +314,56 @@ try_player_action:
 	cmp ecx, ENT_TYPE_PLAYER
 	je .next_scan
 
-	; tile-bounds test on entity's centre
+	; --- aabb overlap test ---
+	; entity centre in (rcx, edx) - rcx = ex, edx = ey
 	mov ecx, [rax + ENT_X_OFFSET]
-	cmp ecx, r13d
-	jl .next_scan
-	mov edi, r13d
-	add edi, TILE_SIZE
-	cmp ecx, edi
-	jge .next_scan
-	mov ecx, [rax + ENT_Y_OFFSET]
-	cmp ecx, r14d
-	jl .next_scan
-	mov edi, r14d
-	add edi, TILE_SIZE
-	cmp ecx, edi
+	mov edx, [rax + ENT_Y_OFFSET]
+
+	; x overlap?
+	;	if (ex + SPRITE_SIZE/2 <= sx_lo) miss;(entity too far left)
+	;	if (ex - SPRITE_SIZE/2 >= sx_hi) miss;(entity too far right)
+	;
+	; sx_hi - sx_lo = TILE_SIZE + 2*SWING_EXTRA  (constant)
+	mov edi, ecx
+	add edi, SPRITE_SIZE / 2
+	cmp edi, r13d
+	jle .next_scan				; ex_hi <= sx_lo -> no overlap
+	mov edi, ecx
+	sub edi, SPRITE_SIZE / 2
+	mov esi, r13d
+	add esi, TILE_SIZE + 2 * SWING_EXTRA	; sx_hi
+	cmp edi, esi
+	jge .next_scan				; ex_lo >= sx_hi
+
+	; y overlap?
+	mov edi, edx
+	add edi, SPRITE_SIZE / 2
+	cmp edi, r14d
+	jle .next_scan
+	mov edi, edx
+	sub edi, SPRITE_SIZE / 2
+	mov esi, r14d
+	add esi, TILE_SIZE + 2 * SWING_EXTRA
+	cmp edi, esi
 	jge .next_scan
 
-	; hit! kill and +1 gold (TMP until we have hp/damage)
+	; --- hit! deal damage ---
+	; subtract HIT_DAMAGE from the entity's hp.  if it drops to 0
+	; (or below), the entity dies and we award gold
+	%define HIT_DAMAGE		3
+	movzx edi, byte [rax + ENT_HP_OFFSET]
+	sub edi, HIT_DAMAGE
+	jg .alive_after_hit			; jg = strictly greater than 0
+	; dead
+	mov byte [rax + ENT_HP_OFFSET], 0
 	mov edi, r15d
 	call entity_kill
 	inc word [player_res_gold]
 	lea rdi, [floattext_gold]
 	call spawn_floattext
+	jmp .out
+.alive_after_hit:
+	mov byte [rax + ENT_HP_OFFSET], dil
 	jmp .out
 
 .next_scan:
@@ -595,16 +636,14 @@ sync_player_to_entity:
 ;================================================================
 ; setup_world_entities: wipe + repopulate after a world regen
 ;----------------------------------------------------------------
-;spawns the player at entity[0](using x/y from place_player_on_floor)
-; and scatters a handful of stub heroes/monsters around them
-; TMP
+; just sets up the player at entity[0].  npcs (heroes & monsters)
+; come from spawn_tick over time - heroes in lit areas, monsters
+; in dark ones - so the world feels populated by the player's
+; actions, not by a pre-scatter
 ;================================================================
 setup_world_entities:
-	push rbx
-	push r12
-	push r14
-	push r15
-	; 4 pushes = 32 bytes = 16-aligned
+	push rbp
+	mov rbp, rsp
 	call entity_clear_all
 
 	; player at i=0, default down facing
@@ -628,67 +667,7 @@ setup_world_entities:
 	mov word [player_res_food], 5
 	mov word [player_res_gold], 0
 
-	; ebx = stubs spawned, r12d = attempts so far (capped)
-	mov ebx, 0
-	mov r12d, 0
-.stub_loop:
-	cmp ebx, 30
-	jge .stubs_done
-	cmp r12d, 400
-	jge .stubs_done
-
-	inc r12d
-
-	; px = player_x + (rand[-15..15]) * TILE
-	mov edi, 31
-	call rng_range
-	sub eax, 15
-	imul eax, TILE_SIZE
-	add eax, [player_x]
-	mov r14d, eax			; r14 = candidate x
-
-	mov edi, 31
-	call rng_range
-	sub eax, 15
-	imul eax, TILE_SIZE
-	add eax, [player_y]
-	mov r15d, eax			; r15 = candidate y
-
-	; reject if not walkable
-	mov edi, r14d
-	mov esi, r15d
-	call tile_speed_at_pixel
-	cmp eax, 100
-	jne .stub_loop
-
-	; pick type/slot: 2/3 heroes, 1/3 monsters.  roll 0..2
-	mov edi, 3
-	call rng_range
-	test eax, eax
-	jz .spawn_monster
-	; hero
-	mov edi, ENT_TYPE_HERO
-	mov esi, r14d
-	mov edx, r15d
-	mov ecx, 4				; hero base slot
-	call entity_spawn
-	jmp .check_spawn
-.spawn_monster:
-	mov edi, ENT_TYPE_MONSTER
-	mov esi, r14d
-	mov edx, r15d
-	mov ecx, 8				; monster base slot
-	call entity_spawn
-.check_spawn:
-	test eax, eax
-	js .stubs_done			; table full
-	inc ebx
-	jmp .stub_loop
-.stubs_done:
-	pop r15
-	pop r14
-	pop r12
-	pop rbx
+	pop rbp
 	ret
 
 ;================================================================
@@ -817,6 +796,23 @@ draw_entities:
 	call blit_texture_rect_keyed
 	add rsp, 32					; 24 args + 8 pad
 
+	; --- HP bar for non-player npcs ---
+	; positioned just above the sprite
+	movzx eax, byte [r13 + ENT_TYPE_OFFSET]
+	; not sure if i should skip player, as hearts are in hud, hm
+	;cmp eax, ENT_TYPE_PLAYER
+	;je .skip
+
+	; world -> screen
+	mov edi, [r13 + ENT_X_OFFSET]
+	sub edi, [camera_x]			; screen cx
+	mov esi, [r13 + ENT_Y_OFFSET]
+	sub esi, [camera_y]
+	sub esi, SPRITE_SIZE / 2	; sprite top
+	sub esi, 4					; 4px above sprite
+	movzx edx, byte [r13 + ENT_HP_OFFSET]
+	call draw_hp_bar
+
 .skip:
 	inc r15d
 	jmp .next
@@ -828,6 +824,75 @@ draw_entities:
 	pop r12
 	pop rbx
 	pop rbp
+	ret
+
+;================================================================
+; draw_hp_bar: small horizontal bar showing entity HP fraction
+;----------------------------------------------------------------
+; bar is HP_BAR_WIDTH x HP_BAR_HEIGHT, centred horizontally on the
+; entity, with screen y = top of the bar.  red bg = full width,
+; green fg = width * hp / DEFAULT_HP_MAX.  no-op at full HP and
+; dead (caller filters any dead..full HP we just always show atm)
+;----------------------------------------------------------------
+; in:	edi = screen cx (entity centre x in screen px)
+;		esi = screen y top of bar
+;		edx = current hp (0..DEFAULT_HP_MAX)
+;================================================================
+%define HP_BAR_WIDTH		14
+%define HP_BAR_HEIGHT		2
+%define DEFAULT_HP_MAX		10
+
+draw_hp_bar:
+	push rbx
+	push r12
+	push r13
+	; 3 pushes (24) + ret (8) = 32 = 16-aligned, no locals needed
+
+	; clamp hp to [0, MAX]
+	test edx, edx
+	jns .hp_lo_ok
+	xor edx, edx
+.hp_lo_ok:
+	cmp edx, DEFAULT_HP_MAX
+	jle .hp_hi_ok
+	mov edx, DEFAULT_HP_MAX
+.hp_hi_ok:
+	mov r12d, edx				; r12 = hp
+
+	; top-left of bar
+	sub edi, HP_BAR_WIDTH / 2
+	mov ebx, edi				; ebx = bar x
+	mov r13d, esi				; r13 = bar y
+
+	; --- bg (red) for the full width ---
+	mov edi, ebx
+	mov esi, r13d
+	mov edx, HP_BAR_WIDTH
+	mov ecx, HP_BAR_HEIGHT
+	mov r8d, 0xFFB02020			; dark red
+	call fill_rect				; nice to get reuse of this!
+
+	; --- fg (green) for the current fraction ---
+	; fg_w = HP_BAR_WIDTH * hp / DEFAULT_HP_MAX
+	mov eax, HP_BAR_WIDTH
+	imul eax, r12d
+	cdq
+	mov ecx, DEFAULT_HP_MAX
+	idiv ecx
+	test eax, eax
+	jle .out					; nothing to draw if 0 wide
+
+	mov edi, ebx
+	mov esi, r13d
+	mov edx, eax				; fg width
+	mov ecx, HP_BAR_HEIGHT
+	mov r8d, 0xFF30D040			; bright green
+	call fill_rect
+
+.out:
+	pop r13
+	pop r12
+	pop rbx
 	ret
 
 %endif
