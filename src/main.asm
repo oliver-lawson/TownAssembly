@@ -25,6 +25,7 @@ default rel
 %include "bloodmap.inc.asm"
 %include "spawn.inc.asm"
 %include "input.inc.asm"
+%include "reflect.inc.asm"
 
 section .data
 	window_title		db "Town Assembly", 0
@@ -312,6 +313,9 @@ main:
 	; blood splatters between objects and entities so blood sits on
 	; the ground/objects but underneath any entity standing on it
 	call blood_draw_all
+
+	; RTX on
+	call draw_reflections
 
 	; entities (player + NPCs, y-sorted)
 	call draw_entities

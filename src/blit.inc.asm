@@ -536,4 +536,233 @@ blit_texture_rect_keyed_into:
 	leave
 	ret
 
+; ================================================================
+; blit_texture_rect_reflect
+; ----------------------------------------------------------------
+; like blit_texture_rect_keyed but:
+;	- source is read bottom-up (vertical flip)
+;	- dest pixel must already be one of our two water blue
+;	  colours (0xFF80C0FF or 0xFF60A0FF), otherwise the src pixel
+;	  is skipped
+;	- when we do write, we blend 50% with water colour
+;
+; magenta source pixels are still skipped
+; ----------------------------------------------------------------
+; in: same args as blit_texture_rect_keyed.  flip_x and key honoured
+;	  identically; only the y axis is inverted
+; ================================================================
+%define WATER_REFLECT_C0	0xFF80C0FF
+%define WATER_REFLECT_C1	0xFF60A0FF
+
+blit_texture_rect_reflect:
+	push rbp
+	mov rbp, rsp
+	sub rsp, 80
+	push rbx
+	push r12
+	push r13
+	push r14
+	push r15
+
+; locals (rbp-relative):
+;	[rbp-4]  src_x
+;	[rbp-8]  src_y
+;	[rbp-12] src_w
+;	[rbp-16] src_h
+;	[rbp-20] dst_x
+;	[rbp-24] dst_y
+;	[rbp-32] tex ptr
+;	[rbp-36] flip_x
+;	[rbp-40] colour key
+;
+; stack args from caller (above rbp):
+;	[rbp+16] = dst_y
+;	[rbp+24] = flip_x
+;	[rbp+32] = colour key
+
+	mov [rbp-32], rdi
+	mov [rbp-4],  esi
+	mov [rbp-8],  edx
+	mov [rbp-12], ecx
+	mov [rbp-16], r8d
+	mov [rbp-20], r9d
+	mov eax, [rbp+16]
+	mov [rbp-24], eax
+	mov eax, [rbp+24]
+	mov [rbp-36], eax
+	mov eax, [rbp+32]
+	mov [rbp-40], eax
+
+	; --- clip left edge (horizontal, same as keyed) ---
+	mov eax, [rbp-20]
+	test eax, eax
+	jns .r_no_clip_left
+	cmp dword [rbp-36], 0
+	jne .r_clip_left_flipped
+	sub [rbp-4], eax
+	add [rbp-12], eax
+	mov dword [rbp-20], 0
+	jmp .r_no_clip_left
+.r_clip_left_flipped:
+	add [rbp-12], eax
+	mov dword [rbp-20], 0
+.r_no_clip_left:
+
+	; --- clip right edge ---
+	mov eax, [rbp-20]
+	add eax, [rbp-12]
+	cmp eax, WINDOW_W
+	jle .r_no_clip_right
+	mov eax, WINDOW_W
+	sub eax, [rbp-20]
+	mov [rbp-12], eax
+.r_no_clip_right:
+
+	; --- clip TOP edge (dst_y < 0) ---
+	; cutting the top of the output/BOTTOM of the source
+	; leave src_y alone, just shrink h
+	mov eax, [rbp-24]
+	test eax, eax
+	jns .r_no_clip_top
+	add [rbp-16], eax		; src_h += dst_y (dst_y negative)
+	mov dword [rbp-24], 0
+.r_no_clip_top:
+
+	; --- clip BOTTOM edge ---
+	; cutting the bottom of the output cuts the TOP of source
+	; advance src_y forward AND shrink h by the overflow
+	mov eax, [rbp-24]
+	add eax, [rbp-16]
+	cmp eax, WINDOW_H
+	jle .r_no_clip_bottom
+	mov eax, [rbp-24]
+	add eax, [rbp-16]
+	sub eax, WINDOW_H		; eax = overflow
+	add [rbp-8], eax		; src_y += overflow (skip top rows)
+	sub [rbp-16], eax		; src_h -= overflow
+.r_no_clip_bottom:
+
+	cmp dword [rbp-12], 0
+	jle .r_done
+	cmp dword [rbp-16], 0
+	jle .r_done
+
+	; src/dst pointer setup - source row pointer starts at the
+	; LAST row of the rect and walks UP each iteration
+	mov rax, [rbp-32]
+	mov r15, [rax + TEX_PIXELS_OFF]
+	mov r12d, [rax + TEX_WIDTH_OFF] ; tex width in pixels
+
+	; src base = pixels + ((src_y + src_h - 1) * tex_w + src_x_init)
+	; * 4, where src_x_init differs for flipped
+	mov eax, [rbp-8]
+	add eax, [rbp-16]
+	dec eax					; eax = src_y + src_h - 1
+	imul eax, r12d
+	cmp dword [rbp-36], 0
+	jne .r_src_flipped_init
+	add eax, [rbp-4]
+	jmp .r_src_init_done
+.r_src_flipped_init:
+	add eax, [rbp-4]
+	add eax, [rbp-12]
+	dec eax
+.r_src_init_done:
+	shl rax, 2
+	add rax, r15
+	mov rsi, rax
+
+	mov eax, [rbp-24]
+	imul eax, WINDOW_W
+	add eax, [rbp-20]
+	shl rax, 2
+	lea rdi, [framebuffer]
+	add rdi, rax
+
+	; src pitch in bytes, held NEGATIVE since we walk upward
+	mov r13d, r12d
+	shl r13d, 2
+	neg r13d				; r13d = -src_pitch
+
+	mov r14d, [rbp-16]		; rows remaining
+	mov ebx, [rbp-40]		; magenta key
+
+.r_row_loop:
+	mov r10, rsi
+	mov r11, rdi
+	mov ecx, [rbp-12]		; pixel count
+
+	cmp dword [rbp-36], 0
+	jne .r_flip_copy
+
+.r_normal_pixel:
+	mov eax, [rsi]
+	cmp eax, ebx
+	je .r_skip_pixel_n
+	mov edx, [rdi]
+	cmp edx, WATER_REFLECT_C0
+	je .r_blend_n
+	cmp edx, WATER_REFLECT_C1
+	je .r_blend_n
+	jmp .r_skip_pixel_n
+.r_blend_n:
+	shr eax, 1
+	and eax, 0x7F7F7F7F ;halfs
+	shr edx, 1
+	and edx, 0x7F7F7F7F
+	add eax, edx
+	or eax, 0xFF000000	; restore alpha
+	mov [rdi], eax
+.r_skip_pixel_n:
+	add rsi, 4
+	add rdi, 4
+	dec ecx
+	jnz .r_normal_pixel
+	jmp .r_row_done
+
+.r_flip_copy:
+.r_flip_pixel:
+	mov eax, [rsi]
+	cmp eax, ebx
+	je .r_skip_pixel_f
+	mov edx, [rdi]
+	cmp edx, WATER_REFLECT_C0
+	je .r_blend_f
+	cmp edx, WATER_REFLECT_C1
+	je .r_blend_f
+	jmp .r_skip_pixel_f
+.r_blend_f:
+	shr eax, 1
+	and eax, 0x7F7F7F7F
+	shr edx, 1
+	and edx, 0x7F7F7F7F
+	add eax, edx
+	or eax, 0xFF000000
+	mov [rdi], eax
+.r_skip_pixel_f:
+	sub rsi, 4				; right-to-left for x-flip
+	add rdi, 4
+	dec ecx
+	jnz .r_flip_pixel
+
+.r_row_done:
+	; advance: src goes UP by pitch, dst goes DOWN by pitch
+	mov rsi, r10
+	movsxd rax, r13d
+	add rsi, rax			; src += -pitch (one row up)
+	mov rdi, r11
+	add rdi, FB_PITCH
+
+	dec r14d
+	jnz .r_row_loop
+
+.r_done:
+	pop r15
+	pop r14
+	pop r13
+	pop r12
+	pop rbx
+	leave
+	ret
+
 %endif
