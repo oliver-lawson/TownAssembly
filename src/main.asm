@@ -123,6 +123,9 @@ main:
 	call daynight_reset
 	call safezone_recompute		; initial mask
 	call pathing_recompute		; flow field from the hub outward
+	call blood_init				; one-time setup of the blood_fb
+								; tex_struct.  must happen before
+								; any splat or any blood_clear
 	call blood_clear			; no blood on a fresh world
 	call spawn_reset
 
@@ -279,6 +282,9 @@ main:
 
 	; tick the status line fade
 	call status_tick
+
+	; advance bloodmap for fading (usually does nothing)
+	call blood_age_tick
 
 	; clear any stale mouse-click flags - only consume when the
 	; inventory is open. without this, opening the inv after some

@@ -363,4 +363,177 @@ blit_texture_rect_keyed:
 	leave
 	ret
 
+;================================================================
+; blit_texture_rect_keyed_into: like blit_texture_rect_keyed, but
+; writes into an arbitrary destination tex_struct rather than the
+; global framebuffer.  used to bake blood splats into the world-
+; sized blood_fb at splat-time
+;----------------------------------------------------------------
+; clipping uses the destination tex's width/height (not WINDOW_*).
+; no flip - the blood sprite is symmetric enough that we don't
+; need it and skipping it shrinks the inner loop
+;----------------------------------------------------------------
+; in:
+;	rdi |  src tex_ptr
+;	rsi |  dst tex_ptr
+;	edx |  src_x
+;	ecx |  src_y
+;	r8d |  src_w
+;	r9d |  src_h
+;	[rsp+8]  | dst_x
+;	[rsp+16] | dst_y
+;	[rsp+24] | colour key (ARGB)
+;================================================================
+blit_texture_rect_keyed_into:
+	push rbp
+	mov rbp, rsp
+	sub rsp, 96
+	push rbx
+	push r12
+	push r13
+	push r14
+	push r15
+
+; locals (rbp-relative):
+;	[rbp-4]  src_x
+;	[rbp-8]  src_y
+;	[rbp-12] src_w
+;	[rbp-16] src_h
+;	[rbp-20] dst_x
+;	[rbp-24] dst_y
+;	[rbp-32] src tex ptr
+;	[rbp-40] dst tex ptr
+;	[rbp-44] colour key
+;	[rbp-48] dst width (cached)
+;	[rbp-52] dst height (cached)
+;	[rbp-56] dst pitch bytes (= width*4)
+
+	mov [rbp-32], rdi
+	mov [rbp-40], rsi
+	mov [rbp-4],  edx
+	mov [rbp-8],  ecx
+	mov [rbp-12], r8d
+	mov [rbp-16], r9d
+
+	mov eax, [rbp+16]			; dst_x
+	mov [rbp-20], eax
+	mov eax, [rbp+24]			; dst_y
+	mov [rbp-24], eax
+	mov eax, [rbp+32]			; key
+	mov [rbp-44], eax
+
+	; cache dst width/height/pitch
+	mov rax, [rbp-40]
+	mov ecx, [rax + TEX_WIDTH_OFF]
+	mov [rbp-48], ecx
+	mov ecx, [rax + TEX_HEIGHT_OFF]
+	mov [rbp-52], ecx
+	mov ecx, [rbp-48]
+	shl ecx, 2					; pitch bytes
+	mov [rbp-56], ecx
+
+	; --- clip dst rect against the destination tex bounds ---
+	mov eax, [rbp-20]
+	test eax, eax
+	jns .ki_no_clip_left
+	sub [rbp-4], eax
+	add [rbp-12], eax
+	mov dword [rbp-20], 0
+.ki_no_clip_left:
+
+	mov eax, [rbp-24]
+	test eax, eax
+	jns .ki_no_clip_top
+	sub [rbp-8], eax
+	add [rbp-16], eax
+	mov dword [rbp-24], 0
+.ki_no_clip_top:
+
+	mov eax, [rbp-20]
+	add eax, [rbp-12]
+	cmp eax, [rbp-48]
+	jle .ki_no_clip_right
+	mov eax, [rbp-48]
+	sub eax, [rbp-20]
+	mov [rbp-12], eax
+.ki_no_clip_right:
+
+	mov eax, [rbp-24]
+	add eax, [rbp-16]
+	cmp eax, [rbp-52]
+	jle .ki_no_clip_bottom
+	mov eax, [rbp-52]
+	sub eax, [rbp-24]
+	mov [rbp-16], eax
+.ki_no_clip_bottom:
+
+	cmp dword [rbp-12], 0
+	jle .ki_done
+	cmp dword [rbp-16], 0
+	jle .ki_done
+
+	; --- src pointer setup ---
+	mov rax, [rbp-32]
+	mov r15, [rax + TEX_PIXELS_OFF]
+	mov r12d, [rax + TEX_WIDTH_OFF]
+
+	mov eax, [rbp-8]
+	imul eax, r12d
+	add eax, [rbp-4]
+	shl rax, 2
+	add rax, r15
+	mov rsi, rax
+
+; --- dst pointer setup (= dst_tex->pixels + dst_y*dst_w + dst_x) ---
+	mov rax, [rbp-40]
+	mov rdi, [rax + TEX_PIXELS_OFF]
+	mov eax, [rbp-24]
+	imul eax, [rbp-48]
+	add eax, [rbp-20]
+	shl rax, 2;
+	add rdi, rax
+
+	mov r13d, r12d
+	shl r13d, 2					; src pitch bytes
+
+	mov r14d, [rbp-16]			; rows remaining
+	mov ebx, [rbp-44]			; key in ebx for inner-loop compare
+
+.ki_row:
+	mov r10, rsi
+	mov r11, rdi
+	mov ecx, [rbp-12]			; cols
+.ki_pixel:
+	mov eax, [rsi]
+	cmp eax, ebx
+	je .ki_skip
+	mov [rdi], eax
+.ki_skip:
+	add rsi, 4
+	add rdi, 4
+	dec ecx
+	jnz .ki_pixel
+
+	mov rsi, r10
+	add rsi, r13				; next src row
+	mov rdi, r11
+	mov eax, [rbp-56]	; load dst pitch as DWORD (zero-extends 
+						; rax).  did `add rdi, [rbp-56]` which
+						; read an 8-byte qword, sweeping in the 
+						; dst_height field stored at [rbp-52..-49]
+						; as the high half - produced bogus ptrs
+	add rdi, rax
+
+	dec r14d
+	jnz .ki_row
+
+.ki_done:
+	pop r15
+	pop r14
+	pop r13
+	pop r12
+	pop rbx
+	leave
+	ret
+
 %endif
