@@ -264,6 +264,9 @@ main:
 	; this frame.  if we died, this triggers respawn at the hub
 	call sync_entity_to_player
 
+	; slow hp trickle for the player
+	call player_hp_regen_tick
+
 	; resolve overlaps between entities (radial pushback)
 	call entity_resolve_collisions
 

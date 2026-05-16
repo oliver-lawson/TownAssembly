@@ -47,6 +47,10 @@
 
 %define ANIM_PERIOD 10
 
+; slow hp regen for everyone (player, heroes, monsters)
+; 1 hp every one of these frames
+%define REGEN_PERIOD	180
+
 ; field offsets
 %define ENT_X_OFFSET		0
 %define ENT_Y_OFFSET		4

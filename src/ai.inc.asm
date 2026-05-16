@@ -1214,6 +1214,27 @@ ai_tick:
 	mov byte [r12 + ENT_HIT_TIMER_OFFSET], al
 .ht_done:
 
+; --- slow hp regen: +1 every REGEN_PERIOD frames if below max ---
+	; staggered per entity by adding our index to the global frame
+	; counter so we don't get all-at-once regen spikes across the table.
+	; we trickle up regardless of mode - fleeing npcs especially need
+	; this so they don't stay retreating forever.  mb turn this off
+	; while FIGHTING?
+	mov eax, [frame_count]
+	add eax, ebx
+	xor edx, edx
+	mov ecx, REGEN_PERIOD
+	div ecx
+	test edx, edx
+	jnz .regen_done
+	movzx eax, byte [r12 + ENT_HP_OFFSET]
+	movzx ecx, byte [r12 + ENT_HP_MAX_OFFSET]
+	cmp eax, ecx
+	jge .regen_done
+	inc eax
+	mov byte [r12 + ENT_HP_OFFSET], al
+.regen_done:
+
 	; --- macro tier: re-decide if countdown elapsed ---
 	movzx eax, byte [r12 + ENT_DECISION_TICKS_OFFSET]
 	test eax, eax

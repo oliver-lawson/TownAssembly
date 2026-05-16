@@ -752,12 +752,39 @@ sync_entity_to_player:
 	ret
 
 ;================================================================
+; player_hp_regen_tick: slow trickle of hp, called once per frame
+;----------------------------------------------------------------
+; gates on (frame_count % REGEN_PERIOD == 0) - just one bump per
+; period, no per-entity stagger needed since there's only the one
+; player.  player_hp is u16 (so /set can crank it high), hp_max
+; same.  sync_player_to_entity clamps to 255 when copying down to
+; the entity byte
+;----------------------------------------------------------------
+; must run AFTER sync_entity_to_player so we don't get clobbered
+; by it pulling damage back the same frame
+;================================================================
+player_hp_regen_tick:
+	mov eax, [frame_count]
+	xor edx, edx
+	mov ecx, REGEN_PERIOD
+	div ecx
+	test edx, edx
+	jnz .out
+	mov ax, [player_hp]
+	cmp ax, [player_hp_max]
+	jae .out
+	inc ax
+	mov [player_hp], ax
+.out:
+	ret
+
+;================================================================
 ; player_die_and_respawn
 ;----------------------------------------------------------------
 ; wake up at "hub", lose a chunk of carried lose half our resources
 ;
-; hp resets to half max so we're not insta-killed on respawn, will
-; add hp regen later.
+; hp resets to half max so we're not insta-killed on respawn -
+; then player_hp_regen_tick works away
 ;----------------------------------------------------------------
 ; resets entity[0]'s alive flag, clears any targeting that NPCs had
 ; on us so they wander off, and logs a status line
