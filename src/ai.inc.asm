@@ -29,6 +29,16 @@
 %define ENGAGE_STEP				1	; px per AI tick when chasing
 %define FLEE_STEP				1	; px per AI tick when fleeing
 
+; pose-render timers (read by draw_entities):
+%define HIT_FLASH_FRAMES		8
+%define ATTACK_POSE_FRAMES		10 ; both frames together
+
+; -- stuck-detection (ai_move_in_dir): --
+; how many consecutive frames of being still on the same tile
+%define STUCK_BREAKOUT_FRAMES	120
+; how long to stay in WANDER after breakout
+%define STUCK_RECOVER_FRAMES	120
+
 section .text
 
 ;================================================================
@@ -347,13 +357,24 @@ ai_decide:
 .write_mode:
 	mov byte [r12 + ENT_AI_MODE_OFFSET], cl
 
-	; target idx (low byte of r14 or sentinel)
+	; target idx (low byte of r14 or sentinel).  if the target
+	; changed, invalidate any cached path - it points at the old
+	; enemy and would lead us nowhere useful
+	movzx eax, byte [r12 + ENT_AI_TARGET_OFFSET]
 	test r14d, r14d 
 	js .clear_target
+	cmp eax, r14d
+	je .target_same
 	mov byte [r12 + ENT_AI_TARGET_OFFSET], r14b
+	mov edi, [rsp + 0]
+	call entity_path_clear
+	jmp .ticks
+.target_same:
 	jmp .ticks
 .clear_target:
 	mov byte [r12 + ENT_AI_TARGET_OFFSET], AI_TARGET_NONE
+	mov edi, [rsp + 0]
+	call entity_path_clear
 
 .ticks:
 	; reset the decision countdown.  add a tiny jitter so all npcs
@@ -407,7 +428,7 @@ ai_step_toward:
 	mov ecx, [rax + ENT_Y_OFFSET]
 	sub ecx, [r13 + ENT_Y_OFFSET]
 
-	; pick larger axis; tie -> x
+	; |dx|, |dy|
 	mov eax, edx
 	test eax, eax
 	jns .ax_pos
@@ -419,9 +440,43 @@ ai_step_toward:
 	neg edi
 .ay_pos:
 
+	; try and stop diagonal movement from flippflopping by making
+	; axis changes a bit sticky
+	movzx r8d, byte [r13 + ENT_AI_DIR_OFFSET]
+	cmp r8d, AI_DIR_LEFT
+	je .cur_x
+	cmp r8d, AI_DIR_RIGHT
+	je .cur_x
+	cmp r8d, AI_DIR_UP
+	je .cur_y
+	cmp r8d, AI_DIR_DOWN
+	je .cur_y
+	; current ai_dir is IDLE - no bias, pick the larger axis
+	jmp .pick_larger
+.cur_x:
+	; currently moving on x.  switch to y only if |dy|*4 > |dx|*5
+	mov r8d, edi
+	imul r8d, 4
+	mov r9d, eax
+	imul r9d, 5
+	cmp r8d, r9d
+	jg .pick_y
+	jmp .pick_x
+.cur_y:
+	; currently moving on y.  switch to x only if |dx|*4 > |dy|*5
+	mov r8d, eax
+	imul r8d, 4
+	mov r9d, edi
+	imul r9d, 5
+	cmp r8d, r9d
+	jg .pick_x
+	jmp .pick_y
+
+.pick_larger:
 	cmp eax, edi
 	jl .pick_y	; |dy| > |dx| -> step y
 
+.pick_x:
 	; step x: by sign of dx
 	test edx, edx
 	jns .step_right
@@ -450,6 +505,224 @@ ai_step_toward:
 	ret
 
 ;================================================================
+; ai_plan_path_to_target: run A* from this npc to its current
+; ai_target.  on success the entity's path side table is filled
+; in goal->start order, ready for ai_step_toward_waypoint to walk
+;----------------------------------------------------------------
+; in:	edi = self entity idx
+; out:	eax = 1 if a path was planned, 0 otherwise (caller can
+;		drop to wander, or just let the greedy step-toward run
+;		this frame and try again next time)
+;----------------------------------------------------------------
+; stack frame (ret 8 + 3 push 24 + sub 16 = 48, 16-aligned):
+;	[rsp+0]  start_tx
+;	[rsp+4]  start_ty
+;	[rsp+8]  goal_tx
+;	[rsp+12] goal_ty
+;================================================================
+ai_plan_path_to_target:
+	push rbx
+	push r12
+	push r13
+	sub rsp, 16
+
+	mov ebx, edi				; ebx = self idx
+
+	mov edi, ebx
+	call entity_ptr
+	mov r12, rax				; r12 = self ptr
+
+	movzx eax, byte [r12 + ENT_AI_TARGET_OFFSET]
+	cmp eax, AI_TARGET_NONE
+	je .fail
+	mov edi, eax
+	call entity_ptr
+	mov r13, rax				; r13 = target ptr
+
+	movzx eax, byte [r13 + ENT_FLAGS_OFFSET]
+	test eax, ENT_FLAG_ALIVE
+	jz .fail
+
+	; tile coords for both ends.  px / TILE_SIZE with floor-for-neg
+	mov eax, [r12 + ENT_X_OFFSET]
+	call .px_to_tile
+	mov [rsp + 0], eax			; start_tx
+
+	mov eax, [r12 + ENT_Y_OFFSET]
+	call .px_to_tile
+	mov [rsp + 4], eax			; start_ty
+
+	mov eax, [r13 + ENT_X_OFFSET]
+	call .px_to_tile
+	mov [rsp + 8], eax			; goal_tx
+
+	mov eax, [r13 + ENT_Y_OFFSET]
+	call .px_to_tile
+	mov [rsp + 12], eax			; goal_ty
+
+	mov edi, ebx
+	mov esi, [rsp + 0]
+	mov edx, [rsp + 4]
+	mov ecx, [rsp + 8]
+	mov r8d, [rsp + 12]
+	call astar_find_path
+	jmp .out
+
+.fail:
+	xor eax, eax
+.out:
+	add rsp, 16
+	pop r13
+	pop r12
+	pop rbx
+	ret
+
+; tiny tail: floor(eax / TILE_SIZE).  trashes ecx/edx
+.px_to_tile:
+	mov ecx, TILE_SIZE
+	cdq
+	idiv ecx
+	test edx, edx
+	jns .pt_ok
+	dec eax
+.pt_ok:
+	ret
+
+;================================================================
+; ai_step_toward_waypoint: pick the cardinal AI_DIR_ that closes
+; distance to the entity's current path waypoint.  if we're close
+; enough to the waypoint, advance to the next one first.  if the
+; path is exhausted, eax=0 returned so the caller can replan
+;----------------------------------------------------------------
+; in:	edi = self entity idx
+; out:	eax = 1 if a waypoint direction was set, 0 if path empty
+;		(no direction set in the entity when 0)
+;================================================================
+ai_step_toward_waypoint:
+	push rbx
+	push r12
+	push r13
+	; 3 pushes (24) + ret (8) = 32 - aligned for inner calls
+
+	mov ebx, edi
+	call entity_ptr
+	mov r12, rax				; r12 = self ptr
+
+	mov edi, ebx
+	call entity_path_current_waypoint
+	test eax, eax
+	jz .none
+	; ecx = wp_tx, edx = wp_ty - pack into r13 (both fit u8)
+	shl edx, 16
+	or ecx, edx
+	mov r13d, ecx				; r13 low16=tx, upper16=ty
+
+	; waypoint centre in pixels
+	movzx eax, r13w
+	imul eax, TILE_SIZE
+	add eax, TILE_SIZE / 2
+	mov ecx, eax				; wp_cx
+	mov eax, r13d
+	shr eax, 16
+	imul eax, TILE_SIZE
+	add eax, TILE_SIZE / 2
+	mov edx, eax				; wp_cy
+
+	; reached? chebyshev to centre
+	mov eax, ecx
+	sub eax, [r12 + ENT_X_OFFSET]
+	test eax, eax
+	jns .wp_dxp
+	neg eax
+.wp_dxp:
+	mov r8d, eax
+	mov eax, edx
+	sub eax, [r12 + ENT_Y_OFFSET]
+	test eax, eax
+	jns .wp_dyp
+	neg eax
+.wp_dyp:
+	cmp eax, r8d
+	jge .wp_have_cheb
+	mov eax, r8d
+.wp_have_cheb:
+	cmp eax, PATH_WAYPOINT_REACH_PX
+	jg .pick_dir				; not close enough yet
+
+	; close enough - advance to the next waypoint and refetch
+	mov edi, ebx
+	call entity_path_advance
+	mov edi, ebx
+	call entity_path_current_waypoint
+	test eax, eax
+	jz .none					; path consumed
+	shl edx, 16
+	or ecx, edx
+	mov r13d, ecx
+	movzx eax, r13w
+	imul eax, TILE_SIZE
+	add eax, TILE_SIZE / 2
+	mov ecx, eax
+	mov eax, r13d
+	shr eax, 16
+	imul eax, TILE_SIZE
+	add eax, TILE_SIZE / 2
+	mov edx, eax
+
+.pick_dir:
+	; signed dx, dy = wp_centre - self
+	mov esi, ecx
+	sub esi, [r12 + ENT_X_OFFSET]
+	mov edi, edx
+	sub edi, [r12 + ENT_Y_OFFSET]
+
+	mov eax, esi
+	test eax, eax
+	jns .ax_pos
+	neg eax
+.ax_pos:
+	mov ecx, edi
+	test ecx, ecx
+	jns .ay_pos
+	neg ecx
+.ay_pos:
+	; pick larger axis
+	cmp eax, ecx
+	jl .pick_y
+
+.pick_x:
+	test esi, esi
+	jns .px_right
+	mov byte [r12 + ENT_AI_DIR_OFFSET], AI_DIR_LEFT
+	mov byte [r12 + ENT_FACING_OFFSET], FACE_LEFT
+	jmp .ok
+.px_right:
+	mov byte [r12 + ENT_AI_DIR_OFFSET], AI_DIR_RIGHT
+	mov byte [r12 + ENT_FACING_OFFSET], FACE_RIGHT
+	jmp .ok
+
+.pick_y:
+	test edi, edi
+	jns .py_down
+	mov byte [r12 + ENT_AI_DIR_OFFSET], AI_DIR_UP
+	mov byte [r12 + ENT_FACING_OFFSET], FACE_UP
+	jmp .ok
+.py_down:
+	mov byte [r12 + ENT_AI_DIR_OFFSET], AI_DIR_DOWN
+	mov byte [r12 + ENT_FACING_OFFSET], FACE_DOWN
+
+.ok:
+	mov eax, 1
+	jmp .out_wp
+.none:
+	xor eax, eax
+.out_wp:
+	pop r13
+	pop r12
+	pop rbx
+	ret
+
+;================================================================
 ; ai_step_away: mirror of ai_step_toward, picks the dir that
 ; increases distance from target.  used by FLEEING
 ;----------------------------------------------------------------
@@ -470,7 +743,7 @@ ai_step_away:
 	call entity_ptr
 
 	; flee dir is the opposite of step-toward: target - self, then
-	; pick larger axis, then step AWAY from target along that axis
+	; pick the axis to flee on, then step AWAY from target along it
 	mov edx, [rax + ENT_X_OFFSET]
 	sub edx, [r13 + ENT_X_OFFSET]
 	mov ecx, [rax + ENT_Y_OFFSET]
@@ -487,9 +760,39 @@ ai_step_away:
 	neg edi
 .ay_pos:
 
+	;sticky axis (see ai_step_toward)
+	movzx r8d, byte [r13 + ENT_AI_DIR_OFFSET]
+	cmp r8d, AI_DIR_LEFT
+	je .cur_x
+	cmp r8d, AI_DIR_RIGHT
+	je .cur_x
+	cmp r8d, AI_DIR_UP
+	je .cur_y
+	cmp r8d, AI_DIR_DOWN
+	je .cur_y
+	jmp .pick_larger
+.cur_x:
+	mov r8d, edi
+	imul r8d, 4
+	mov r9d, eax
+	imul r9d, 5
+	cmp r8d, r9d
+	jg .pick_y
+	jmp .pick_x
+.cur_y:
+	mov r8d, eax
+	imul r8d, 4
+	mov r9d, edi
+	imul r9d, 5
+	cmp r8d, r9d
+	jg .pick_x
+	jmp .pick_y
+
+.pick_larger:
 	cmp eax, edi
 	jl .pick_y
 
+.pick_x:
 	; flee along x: opposite sign of dx
 	test edx, edx
 	jns .away_left	; target is to our right -> we go left
@@ -576,7 +879,7 @@ ai_move_in_dir:
 	mov byte [r13 + ENT_PHASE_OFFSET], cl
 .save_timer:
 	mov byte [r13 + ENT_TIMER_OFFSET], al
-	jmp .out
+	jmp .check_stuck
 
 .blocked:
 	; nudge: try opening a door in front if it's closed
@@ -606,45 +909,182 @@ ai_move_in_dir:
 	mov edi, ebx
 	call entity_try_open_door_in_dir
 	test eax, eax
-	jnz .out_moved	; door swung - try moving next tick,
-					; counts as progress (no stuck)
+	jnz .check_stuck	; door swung - try moving next tick,
+						; counts as progress (no stuck)
 
 ; --- perpendicular slide: cardinal step blocked, try sidestep ---
-	; trying something, not sure it works well
+	mov edi, 2
+	call rng_range
+	mov ecx, eax					; ecx = 0 or 1 - slide-order bit
 	movzx eax, byte [r13 + ENT_AI_DIR_OFFSET]
 	cmp eax, AI_DIR_UP
 	je .perp_xaxis
 	cmp eax, AI_DIR_DOWN
 	je .perp_xaxis
 	; left/right blocked -> try y axis
+	test ecx, ecx
+	jnz .slide_yp_first
+	; up first, then down
 	mov esi, 0
-	mov edx, -ENGAGE_STEP			; up
+	mov edx, -ENGAGE_STEP
 	mov edi, ebx
 	call entity_try_move
 	test eax, eax
-	jnz .out
+	jnz .check_stuck
 	mov esi, 0
-	mov edx, ENGAGE_STEP			; down
+	mov edx, ENGAGE_STEP
 	mov edi, ebx
 	call entity_try_move
-	jmp .out
+	test eax, eax
+	jnz .check_stuck
+	jmp .check_stuck
+.slide_yp_first:
+	; down first, then up
+	mov esi, 0
+	mov edx, ENGAGE_STEP
+	mov edi, ebx
+	call entity_try_move
+	test eax, eax
+	jnz .check_stuck
+	mov esi, 0
+	mov edx, -ENGAGE_STEP
+	mov edi, ebx
+	call entity_try_move
+	test eax, eax
+	jnz .check_stuck
+	jmp .check_stuck
 .perp_xaxis:
 	; up/down blocked -> try x axis
-	mov esi, -ENGAGE_STEP			; left
+	test ecx, ecx
+	jnz .slide_xp_first
+	; left first, then right
+	mov esi, -ENGAGE_STEP
 	mov edx, 0
 	mov edi, ebx
 	call entity_try_move
 	test eax, eax
-	jnz .out
-	mov esi, ENGAGE_STEP			; right
+	jnz .check_stuck
+	mov esi, ENGAGE_STEP
 	mov edx, 0
 	mov edi, ebx
 	call entity_try_move
-	jmp .out
+	test eax, eax
+	jnz .check_stuck
+	jmp .check_stuck
+.slide_xp_first:
+	; right first, then left
+	mov esi, ENGAGE_STEP
+	mov edx, 0
+	mov edi, ebx
+	call entity_try_move
+	test eax, eax
+	jnz .check_stuck
+	mov esi, -ENGAGE_STEP
+	mov edx, 0
+	mov edi, ebx
+	call entity_try_move
+	test eax, eax
+	jnz .check_stuck
+	jmp .check_stuck
 
 .idle:
 	mov byte [r13 + ENT_TIMER_OFFSET], 0
 	mov byte [r13 + ENT_PHASE_OFFSET], 0
+	jmp .out					; idle isn't stuck - we chose not to move
+
+.check_stuck:
+	; we made some attempt to move - might or might not have actually
+	; changed tile(the sideways slide doesn't change our tile))
+	; compare current tile vs the stored "last sampled tile" in the
+	;s ide table.  if same, stuck_ticks rises.  if different, reset
+	; and store the new tile
+	mov eax, [r13 + ENT_X_OFFSET]
+	mov ecx, TILE_SIZE
+	cdq
+	idiv ecx					; eax = current tx
+	mov r8d, eax
+	mov eax, [r13 + ENT_Y_OFFSET]
+	cdq
+	idiv ecx
+	mov r9d, eax				; r9d = current ty
+
+	lea rcx, [entity_last_tx]
+	movzx edx, byte [rcx + rbx]	; stored tx
+	cmp edx, r8d
+	jne .tile_changed
+	lea rcx, [entity_last_ty]
+	movzx edx, byte [rcx + rbx]
+	cmp edx, r9d
+	jne .tile_changed
+
+	; same tile as last sample - bump stuck_ticks
+	movzx eax, byte [r13 + ENT_STUCK_TICKS_OFFSET]
+	inc eax
+	cmp eax, STUCK_BREAKOUT_FRAMES
+	jl .save_stuck
+
+	; --- breakout! ---
+	; we've been on this tile for STUCK_BREAKOUT_FRAMES despite
+	; attempting moves every frame. try these options in order:
+	;
+	; 1) re-scan for the nearest enemy.the original target might be
+	;    unreachable while a different one is now in sight
+	; 2) if step 1 fails (no enemy or no path), demote to wander
+	;    + use the hub flow field
+	mov edi, ebx
+	call ai_find_nearest_enemy
+	test eax, eax
+	js .breakout_wander
+	; got an enemy - set it and try planning a path
+	mov byte [r13 + ENT_AI_TARGET_OFFSET], al
+	mov edi, ebx
+	call ai_plan_path_to_target
+	test eax, eax
+	jz .breakout_wander		; no path - fall through to wander
+
+	; path found - stay engaged.  reset stuck counter, leave
+	; ai_mode untouched if already engaging (caller may have us
+	; in FIGHTING; let ai_decide sort that out next macro tick)
+	mov byte [r13 + ENT_AI_MODE_OFFSET], AI_MODE_ENGAGING
+	mov byte [r13 + ENT_DECISION_TICKS_OFFSET], DECISION_PERIOD
+	xor eax, eax				; clear stuck counter
+	jmp .save_stuck
+
+.breakout_wander:
+	; use hub flow field to go somewhere, 
+	; wander for STUCK_RECOVER_FRAMES so we don't snap right back
+	; into the same crevice
+	mov edi, [r13 + ENT_X_OFFSET]
+	mov esi, [r13 + ENT_Y_OFFSET]
+	call pathing_dir_at_pixel
+	test eax, eax
+	jnz .breakout_have_dir
+	mov edi, 4
+	call rng_range
+	inc eax			; [0,4) -> AI_DIR_UP..RIGHT
+.breakout_have_dir:
+	mov byte [r13 + ENT_AI_DIR_OFFSET], al
+	mov byte [r13 + ENT_AI_MODE_OFFSET], AI_MODE_WANDER
+	mov byte [r13 + ENT_AI_TARGET_OFFSET], AI_TARGET_NONE
+	mov byte [r13 + ENT_DECISION_TICKS_OFFSET], STUCK_RECOVER_FRAMES
+	mov word [r13 + ENT_AI_TICKS_OFFSET], STUCK_RECOVER_FRAMES
+	; also clear any cached path now that we're going off plan
+	mov edi, ebx
+	call entity_path_clear
+	xor eax, eax	; clear stuck counter after breakout
+.save_stuck:
+	mov byte [r13 + ENT_STUCK_TICKS_OFFSET], al
+	jmp .out
+
+.tile_changed:
+	; we crossed a tile boundary since last sample - clear the
+	; counter, store the new tile, and continue.  no breakout needed
+	lea rcx, [entity_last_tx]
+	mov [rcx + rbx], r8b
+	lea rcx, [entity_last_ty]
+	mov [rcx + rbx], r9b
+	mov byte [r13 + ENT_STUCK_TICKS_OFFSET], 0
+
 .out:
 	pop r13
 	pop r12
@@ -715,6 +1155,14 @@ ai_attack_tick:
 	sub eax, ENGAGE_DAMAGE
 	jg .alive_after
 	mov byte [r13 + ENT_HP_OFFSET], 0
+	; death - splat a single blood mark at this tile
+	; push rdi/rsi for the call args (recomputed-then-discarded so
+	; we don't need them back)
+	mov edi, [r13 + ENT_X_OFFSET]
+	mov esi, [r13 + ENT_Y_OFFSET]
+	sub rsp, 8 ; keepaligned
+	call blood_splat_at_pixel
+	add rsp, 8
 	movzx edi, byte [r12 + ENT_AI_TARGET_OFFSET]
 	call entity_kill
 	; clear our target
@@ -725,6 +1173,11 @@ ai_attack_tick:
 	jmp .out
 .alive_after:
 	mov byte [r13 + ENT_HP_OFFSET], al
+	; flash the hit pose for HIT_FLASH_FRAMES + splat blood
+	mov byte [r13 + ENT_HIT_TIMER_OFFSET], HIT_FLASH_FRAMES
+	mov edi, [r13 + ENT_X_OFFSET]
+	mov esi, [r13 + ENT_Y_OFFSET]
+	call blood_splat_at_pixel
 
 .out:
 	pop r13
@@ -753,6 +1206,14 @@ ai_tick:
 	call entity_ptr
 	mov r12, rax
 
+	; --- decay the hit-flash pose timer ---
+	movzx eax, byte [r12 + ENT_HIT_TIMER_OFFSET]
+	test eax, eax
+	jz .ht_done
+	dec eax
+	mov byte [r12 + ENT_HIT_TIMER_OFFSET], al
+.ht_done:
+
 	; --- macro tier: re-decide if countdown elapsed ---
 	movzx eax, byte [r12 + ENT_DECISION_TICKS_OFFSET]
 	test eax, eax
@@ -775,9 +1236,12 @@ ai_tick:
 	movzx ecx, byte [rax + ENT_FLAGS_OFFSET]
 	test ecx, ENT_FLAG_ALIVE
 	jnz .no_target_check
-	; dead - clear and downgrade
+	; dead - clear and downgrade.  also wipe any cached path since
+	; it pointed at where the corpse fell
 	mov byte [r12 + ENT_AI_TARGET_OFFSET], AI_TARGET_NONE
 	mov byte [r12 + ENT_AI_MODE_OFFSET], AI_MODE_WANDER
+	mov edi, ebx
+	call entity_path_clear
 .no_target_check:
 
 	; --- micro tier: dispatch by mode ---
@@ -799,14 +1263,41 @@ ai_tick:
 	jmp .out
 
 .m_engage:
-	; refresh step direction toward target each frame so movement
-	; tracks a moving enemy.  if no target, we shouldn't be here! -
-	; ai_decide cleared the target -> mode dropped to wander already
+	; new pathing-aware engage:
+	; 1) if no target, bail (ai_decide will clear mode next tick)
+	; 2) if the path is stale (world changed) or missing, try a
+	;    replan.  on success carry on to follow it.  on fail, fall
+	;    back to greedy step_toward for this frame - we'll try
+	;    again next decision tick
+	; 3) follow the waypoint chain.  if it runs out, replan
 	movzx esi, byte [r12 + ENT_AI_TARGET_OFFSET]
 	cmp esi, AI_TARGET_NONE
 	je .out
+
+	mov edi, ebx
+	call entity_path_is_stale
+	test eax, eax
+	jz .have_path
+	mov edi, ebx
+	call ai_plan_path_to_target
+	; either way (success or fail) try walking the path - on fail
+	; the path is empty so ai_step_toward_waypoint returns 0 and
+	; we fall through to greedy step
+
+.have_path:
+	mov edi, ebx
+	call ai_step_toward_waypoint
+	test eax, eax
+	jnz .engage_move
+
+	; no waypoint - either we just consumed the last one, or the
+	; replan failed.  greedy step_toward is the safety net so we at
+	; least try to make progress this frame
+	movzx esi, byte [r12 + ENT_AI_TARGET_OFFSET]
 	mov edi, ebx
 	call ai_step_toward
+
+.engage_move:
 	mov edi, ebx
 	call ai_move_in_dir
 	jmp .out

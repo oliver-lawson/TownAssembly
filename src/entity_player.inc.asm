@@ -1,6 +1,34 @@
 ; entity_player.inc.asm - player state, input, movement, action,
 ; floating text feedback, sync into the entity table, and the
 ; mixed player/npc draw routine
+;----------------------------------------------------------------
+; SPRITE SHEET LAYOUT (sprites.ppm)
+; ---------------------------------
+; each row is one "POSE"; each
+; group of 4 consecutive columns is a CHARACTER.  draw_entities
+; uses ENT_SLOT_OFFSET as the base column of the character's
+; 4-col block and picks the row by render-time state
+;
+; cols (per character block):
+;	+0	facing down
+;	+1	facing up
+;	+2	left frame A (also right, flipped)
+;	+3	left frame B (also right, flipped) - walk row only
+;
+; rows:
+;	0	WALK	- 2-frame leg cycle; col +3 = the alt leg pose
+;	1	ATTACK A	- attack swing first frame; col +3 unused/blank
+;	2	ATTACK B	- attack swing second frame; col +3 unused/blank
+;	3	HIT			- damage-taken pose; col +3 unused/blank
+;
+; current character blocks (cols * 4):
+;	0..3	player
+;	4..7	hero
+;	8..11	monster
+;
+; easy system, to add more chars we just need to append
+; a new 4-col block and add its base col to hero_sprite_bases/
+; monster_sprite_bases in spawn.inc.asm
 %ifndef ENTITY_PLAYER_INC
 %define ENTITY_PLAYER_INC
 
@@ -354,8 +382,14 @@ try_player_action:
 	movzx edi, byte [rax + ENT_HP_OFFSET]
 	sub edi, HIT_DAMAGE
 	jg .alive_after_hit			; jg = strictly greater than 0
-	; dead
+	; dead - cache the corpse pixel pos before entity_kill, then
+	; drop a blood mark there
 	mov byte [rax + ENT_HP_OFFSET], 0
+	mov edi, [rax + ENT_X_OFFSET]
+	mov esi, [rax + ENT_Y_OFFSET]
+	; rsp at this point: 5 callee-saves (40) + ret (8) = 48 aligned,
+	; with no extra subq.  call directly, no padding needed
+	call blood_splat_at_pixel
 	mov edi, r15d
 	call entity_kill
 	inc word [player_res_gold]
@@ -364,6 +398,11 @@ try_player_action:
 	jmp .out
 .alive_after_hit:
 	mov byte [rax + ENT_HP_OFFSET], dil
+	; trigger the hit-flash pose and a blood mark for feedback
+	mov byte [rax + ENT_HIT_TIMER_OFFSET], HIT_FLASH_FRAMES
+	mov edi, [rax + ENT_X_OFFSET]
+	mov esi, [rax + ENT_Y_OFFSET]
+	call blood_splat_at_pixel
 	jmp .out
 
 .next_scan:
@@ -694,6 +733,15 @@ sync_entity_to_player:
 	movzx ecx, byte [rax + ENT_HP_OFFSET]
 	mov word [player_hp], cx
 
+	; decay the player's hit-flash pose timer.  NPCs do this inside
+	; ai_tick; the player never goes through there
+	movzx ecx, byte [rax + ENT_HIT_TIMER_OFFSET]
+	test ecx, ecx
+	jz .ht_done
+	dec ecx
+	mov byte [rax + ENT_HIT_TIMER_OFFSET], cl
+.ht_done:
+
 	; flagged dead?
 	movzx ecx, byte [rax + ENT_FLAGS_OFFSET]
 	test ecx, ENT_FLAG_ALIVE
@@ -848,6 +896,8 @@ setup_world_entities:
 	mov byte [rax + ENT_SPEED_OFFSET], 100
 	mov byte [rax + ENT_DECISION_TICKS_OFFSET], 0
 	mov byte [rax + ENT_ATTACK_TICKS_OFFSET], 0
+	mov byte [rax + ENT_HIT_TIMER_OFFSET], 0
+	mov byte [rax + ENT_STUCK_TICKS_OFFSET], 0
 	; make sure entity_count covers us
 	mov eax, [entity_count]
 	cmp eax, 1
@@ -891,7 +941,7 @@ draw_entities:
 	push r13
 	push r14
 	push r15
-	sub rsp, 8						; align
+	sub rsp, 24						; [rsp]=pose scratch, [rsp+8]=tall_idx
 
 	call entity_sort_draw_order
 
@@ -921,16 +971,63 @@ draw_entities:
 	add esi, SHADOW_Y_OFF			; screen y (feet)
 	call draw_shadow_ellipse
 
-	; pose pick - works for any entity using the 4-frame layout
-	; (down, up, left-A, left-B).  the entity's sprite_slot field
-	; is the *base* slot of its 4-frame block
-	;	facing DOWN  -> base+0, flip alternates w/ phase
-	;	facing UP	 -> base+1, flip alternates w/ phase
-	;	facing LEFT  -> base+2 or base+3 by phase, no flip
-	;	facing RIGHT -> base+2 or base+3 by phase, flipped
-	; very TEMP
+	; --- pose pick ---
+	; the sprites sheet is laid out as 4 rows x N cols, cell 16x16
+	; pose row picks the row, facing+phase picks the col within the
+	; entity's 4-frame block:
+	;	row 0 = walking
+	;	row 1 = attack frame A
+	;	row 2 = attack frame B
+	;	row 3 = hit (damage flash)
+	;
+	; col offsets within the block:
+	;	walk:	down, base, left a, left b
+	;	non-walk: down=base, up, left, BLANK
+	;
+	; r12d ends up as (base + col), r14d as pose row, ecx as flip.
+	; [rsp+0] is our scratch slot; we stash the pose row there
+	; since we need r14 free for entity_count
+	;
+	; --- pick pose row ---
+	; precedence: hit-flash > attack pose > walk.  attack pose only
+	; applies when actually in FIGHTING mode - otherwise the stale
+	; attack_ticks value from a previous fight (held between mode
+	; transitions, since only ai_attack_tick updates it) locks
+	; fleeing/wandering npcs to attack rows by mistake it turns out!
+	movzx eax, byte [r13 + ENT_HIT_TIMER_OFFSET]
+	test eax, eax
+	jnz .pose_hit
+	movzx eax, byte [r13 + ENT_AI_MODE_OFFSET]
+	cmp eax, AI_MODE_FIGHTING
+	jne .pose_walk				; not fighting -> no attack pose
+	movzx eax, byte [r13 + ENT_ATTACK_TICKS_OFFSET]
+	cmp eax, ATTACK_PERIOD - ATTACK_POSE_FRAMES
+	jle .pose_walk				; outside the swing window
+	; inside the swing window.  first half = A, second half = B
+	cmp eax, ATTACK_PERIOD - (ATTACK_POSE_FRAMES / 2)
+	jle .pose_atk_b
+	mov dword [rsp], 1			; row 1 = attack A
+	jmp .pose_have_row
+.pose_atk_b:
+	mov dword [rsp], 2			; row 2 = attack B
+	jmp .pose_have_row
+.pose_hit:
+	mov dword [rsp], 3			; row 3 = hit
+	jmp .pose_have_row
+.pose_walk:
+	mov dword [rsp], 0			; row 0 = walking
+.pose_have_row:
+
+	; --- pick col + flip ---
+	; for non-walk rows we skip the 2-frame phase anim
 	movzx r12d, byte [r13 + ENT_SLOT_OFFSET]	; r12 = base slot
 	movzx eax, byte [r13 + ENT_FACING_OFFSET]
+
+	; walk row uses the existing 4-col block
+	cmp dword [rsp], 0
+	jne .non_walk_col
+
+	; --- walk row: original logic ---
 	cmp eax, FACE_DOWN
 	je .pp_down
 	cmp eax, FACE_UP
@@ -958,7 +1055,13 @@ draw_entities:
 	movzx ecx, byte [r13 + ENT_PHASE_OFFSET]
 .pose_done:
 
-	; now blit.  r12d = slot, ecx = flip
+	; pose row was stashed at [rsp].  multiply by SPRITE_SIZE to get
+	; src_y, hold in r11d through the upcoming push/pop dance
+	; (it's consumed by mov edx, r11d just before the blit call)
+	mov r11d, [rsp]
+	imul r11d, SPRITE_SIZE
+
+	; now blit.  r12d = slot, ecx = flip, r11d = src_y
 	; using callee-saved regs to hold dst_x, dst_y
 	push rcx					; flip onto stack briefly
 	mov eax, [r13 + ENT_X_OFFSET]
@@ -990,7 +1093,7 @@ draw_entities:
 	lea rdi, [sprites_tex]
 	mov esi, r12d
 	imul esi, SPRITE_SIZE		; src_x
-	xor edx, edx				; src_y = 0
+	mov edx, r11d				; src_y from pose row
 	mov ecx, SPRITE_SIZE		; src_w
 	mov r8d, SPRITE_SIZE		; src_h
 	mov r9d, ebx				; dst_x

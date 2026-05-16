@@ -15,12 +15,20 @@
 ;+12  anim_timer  u8		counts up to ANIM_PERIOD
 ;+13  flags		  u8		bit 0 = alive, bit 1 = flip h this frame
 ;+14  hp		  u8
-;+15  pad		  u8
-;+16  ai_state	  u32		reserved for utility-AI tick state
-;+20  ai_data	  u32		reserved (target tile, goal id, ..?)
-;+24  pad		  u64		reserved
-;
-; the AI/collision/sort fields are reserved for future tinkering
+;+15  hp_max	  u8
+;+16  ai_dir	  u8		AI_DIR_*
+;+17  ai_mode	  u8		AI_MODE_*
+;+18  ai_ticks	  u16		wander direction countdown
+;+20  ai_accum	  u32		fractional-speed accumulator
+;+24  ai_target	  u8		entity idx, AI_TARGET_NONE
+;+25  bravery	  u8
+;+26  speed		  u8
+;+27  decision_ticks u8
+;+28  attack_ticks u8
+;+29  hit_timer	  u8		frames left of damage-taken flash pose
+;+30  stuck_ticks u8		see ENT_STUCK_TICKS_OFFSET notes
+;+31  pad		  u8
+;----------------------------------------------------------------
 
 %ifndef ENTITY_INC
 %define ENTITY_INC
@@ -59,6 +67,17 @@
 %define ENT_SPEED_OFFSET	26
 %define ENT_DECISION_TICKS_OFFSET	27
 %define ENT_ATTACK_TICKS_OFFSET		28
+; hit_timer: counts down from HIT_FLASH_FRAMES on damage taken.
+; >0 = render the "got hit" pose (sprite-sheet row 3)
+%define ENT_HIT_TIMER_OFFSET		29
+; stuck_ticks: counts up each frame ai_move_in_dir tried every step
+; option and was blocked by all of them.  resets on any successful
+; move.  ai_move_in_dir uses it to detect the wedged-in-a-concave
+; case (typically two npcs facing each other into a corner) and
+; shake loose with a random direction once it crests.. not perfect,
+; but does an okay job. implemented before A*
+; STUCK_BREAKOUT_FRAMES
+%define ENT_STUCK_TICKS_OFFSET		30
 
 ; wander direction values (also used as flee/engage direction)
 %define AI_DIR_IDLE			0
@@ -95,6 +114,15 @@ section .bss
 	entity_count		resd 1	; number of slots actually populated
 								; (highest used + 1)
 
+	; stuck-detection side table: per-entity "tile i was on the last
+	; time my stuck-counter incremented".  used by ai_move_in_dir's
+	; tile-displacement check.  side table rather than inline in the
+	; entity struct because the struct is already 32 bytes and we
+	; want to keep that for cache alignment + <<5 indexing
+	alignb 1
+	entity_last_tx		resb ENT_MAX
+	entity_last_ty		resb ENT_MAX
+
 section .data
 	; 0.5 as IEEE-754 single: used by collision resolution to split
 	; the pushback evenly between two NPCs, while i wonder how to do
@@ -115,6 +143,9 @@ entity_clear_all:
 	xor eax, eax
 	rep stosb
 	mov dword [entity_count], 0
+	; clear any cached A* paths too - the entity table just got
+	; wiped, so paths indexed by entity id are meaningless now
+	call entity_path_clear_all
 	pop rax
 	pop rcx
 	pop rdi
@@ -193,6 +224,8 @@ entity_spawn:
 	mov byte [rax + ENT_SPEED_OFFSET], 100
 	mov byte [rax + ENT_DECISION_TICKS_OFFSET], 0
 	mov byte [rax + ENT_ATTACK_TICKS_OFFSET], 0
+	mov byte [rax + ENT_HIT_TIMER_OFFSET], 0
+	mov byte [rax + ENT_STUCK_TICKS_OFFSET], 0
 
 	; bump entity_count if we extended past it
 	mov eax, [entity_count]
@@ -223,6 +256,9 @@ entity_spawn:
 ; properly
 ;================================================================
 entity_kill:
+	push rdi
+	call entity_path_clear			; stop drawing path debug dots
+	pop rdi
 	call entity_ptr
 	mov byte [rax + ENT_FLAGS_OFFSET], 0
 	ret

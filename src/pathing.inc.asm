@@ -51,6 +51,14 @@ section .bss
 	alignb 1
 	pathing_debug_view	resb 1
 
+	; pathing_epoch: bumped every time pathing_recompute runs
+	;
+	; our cached A* paths stamp this & compare against it to detect
+	; "the world changed under me, replan" rather than walking
+	; into a freshly-built wall
+	alignb 1
+	pathing_epoch		resb 1
+
 section .text
 
 ;================================================================
@@ -244,6 +252,10 @@ pathing_recompute:
 	push r14
 	push r15
 	;5 pushes (40) + ret (8) = 48 bytes -> 16-aligned for inner calls
+
+	; bump epoch so any cached A* paths know they're stale.
+	; u8 wrap is fine - we only compare for equality
+	inc byte [pathing_epoch]
 
 	; --- clear dir to AI_DIR_IDLE and dist to 0xFFFF ---
 	lea rdi, [pathing_dir]

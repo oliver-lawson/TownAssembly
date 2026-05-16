@@ -9,9 +9,13 @@ default rel
 %include "autotile.inc.asm"
 %include "tilemap.inc.asm"
 %include "entity.inc.asm"
+%include "camera.inc.asm"
+%include "pathing.inc.asm"
+%include "astar.inc.asm"
 %include "ai.inc.asm"
 %include "shadow.inc.asm"
 %include "entity_player.inc.asm"
+%include "reflect.inc.asm"
 %include "daynight.inc.asm"
 %include "worldgen.inc.asm"
 %include "debug.inc.asm"
@@ -21,11 +25,9 @@ default rel
 %include "camera.inc.asm"
 %include "fps.inc.asm"
 %include "safezone.inc.asm"
-%include "pathing.inc.asm"
 %include "bloodmap.inc.asm"
 %include "spawn.inc.asm"
 %include "input.inc.asm"
-%include "reflect.inc.asm"
 
 section .data
 	window_title		db "Town Assembly", 0
@@ -339,6 +341,10 @@ main:
 	; flow-field debug overlay (F7) - per-tile arrow toward hub +
 	; a marker on the hub itself.  same placement reasoning
 	call pathing_draw_debug
+
+	; F7 also shows planned A* paths as a chain of dots per npc.
+	; drawn after the flow-field arrows so the dots sit on top
+	call astar_draw_paths_debug
 
 	; bottom HUD bar
 	call draw_hud_bar
