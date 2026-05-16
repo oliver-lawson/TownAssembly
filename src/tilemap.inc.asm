@@ -181,7 +181,7 @@ section .data
 		db 100		; wood door ew open
 		db 0		; bed
 		db 100		; chair
-		db 0		; torch
+		db 100		; torch - walk through to plant/replace easily
 
 
 	; tile_id -> base atlas slot.  used for non-autotiled tiles
