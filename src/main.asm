@@ -311,7 +311,6 @@ main:
 
 	; blood splatters between objects and entities so blood sits on
 	; the ground/objects but underneath any entity standing on it
-	lea rdi, [atlas_tex]
 	call blood_draw_all
 
 	; entities (player + NPCs, y-sorted)

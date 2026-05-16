@@ -173,28 +173,8 @@ blood_splat_at_tile:
 	and eax, BLOOD_VARIANT_COUNT - 1
 	mov r15d, eax				; r15 = variant 0..15
 
-	; --- jitter mix: tx*53 + ty*191 + seq*97 ---
-	mov eax, r12d
-	imul eax, 53
-	mov ecx, r13d
-	imul ecx, 191
-	add eax, ecx
-	mov ecx, r14d
-	imul ecx, 97
-	add eax, ecx
-	mov ebx, eax				; ebx = jitter bits
-
-	; jx = (ebx & 7) - 4
-	mov ecx, ebx
-	and ecx, 7
-	sub ecx, 4
-	mov edi, ecx				; edi = jx (kept til dst maths)
-	; jy = ((ebx >> 4)& 7) - 4
-	mov ecx, ebx
-	shr ecx, 4
-	and ecx, 7
-	sub ecx, 4
-	mov esi, ecx				; esi = jy
+	; I had nice positional jitter here but that made simple
+	; tile-based fading impossible sadly. oh well.
 
 	; --- src_x, src_y for the variant within the atlas ---
 	; slot = ATLAS_BLOOD_BASE + variant 
@@ -208,15 +188,13 @@ blood_splat_at_tile:
 	mov [rsp + 0], edx			; src_x stashed
 	mov [rsp + 4], eax			; src_y stashed
 
-	; --- dst_x = tx*TILE_SIZE + jx, dst_y = ty*TILE_SIZE + jy ---
+; --- dst_x = tx*TILE_SIZE, dst_y = ty*TILE_SIZE (tile-aligned) ---
 	mov ecx, r12d
 	imul ecx, TILE_SIZE
-	add ecx, edi				; +jx
 	mov [rsp + 8], ecx
 
 	mov ecx, r13d
 	imul ecx, TILE_SIZE
-	add ecx, esi				; +jy
 	mov [rsp + 12], ecx
 
 	; --- bake via blit_texture_rect_keyed_into ---
@@ -394,8 +372,6 @@ blood_clear_tile_region:
 ;================================================================
 ; blood_draw_all: blit the visible camera window of blood_fb to the
 ; screen framebuffer. ONE keyed blit per frame rather than per-blood
-;----------------------------------------------------------------
-; in:	rdi = ptr to atlas texture
 ;================================================================
 blood_draw_all:
 	; signature of blit_texture_rect_keyed:
