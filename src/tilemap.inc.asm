@@ -278,6 +278,15 @@ section .bss
 	; (bumped once per frame in main)
 	tile_anim_ticks resd 1
 
+	; -- tall-tile scratch list --
+	; collected once per frame at the start of draw_entities and
+	; consumed during the interleaved y-sort merge.  each entry is
+	; ty * MAP_WIDTH + tx so we can recover the cell coordinates
+	; without a second lookup.  already y-sorted from row by row scan
+	%define TALL_TILE_MAX	512
+	tall_tile_list		resd TALL_TILE_MAX
+	tall_tile_count		resd 1
+
 section .text
 
 ;================================================================
@@ -1250,7 +1259,7 @@ draw_tilemap:
 	ret
 
 ;================================================================
-; draw_objects
+; draw_objects (pre)
 ;----------------------------------------------------------------
 ; second-pass renderer for the object overlay layer.  same loop
 ; structure as draw_tilemap but reads from objectmap, skips
@@ -1263,6 +1272,88 @@ draw_tilemap:
 ;   - everything else (trees, doors, bed, chair) -> nonauto path
 ;----------------------------------------------------------------
 ; in: rdi = ptr to atlas texture
+;================================================================
+
+;================================================================
+; is_tall_object: how does this tile y-sort with entities?
+;----------------------------------------------------------------
+; classification:
+;	0 = FLAT		- drawn in the normal object pass, under all
+;					entities (empty/doors/beds/chairs/torches/etc)
+;	1 = TREE		- y-sort with entities using tile-top as the
+;					sort key (ty*TILE_SIZE).  player to the side of
+;					a tree at the same tile y is drawn in front,
+;					walking under the leaves. looks great!
+;	2 = WALL_BOTTOM	- y-sort with entities at midline
+;					(ty*TILE_SIZE + TILE_SIZE/2) so entities
+;					crossing the 50% line flip in front
+;	3 = WALL_TALL	- always above entities (sort key beyond any 
+;					possible entity y).  used for walls that aren't
+;					the south end of a run - their art sticks UP the
+;					full tile height so they should occlude anyone
+;					they overlap
+;
+; wall rule: BOTTOM iff the south neighbour is not the same wall.
+; that covers every autotile slot whose artwork shows a ground
+; attachment at the bottom edge - isolated stones, horizontal-
+; only runs (the "first 4 of the last wang row"), and the south
+; end of any vertical run.  walls with a wall directly south of
+; them have their bottom flush against more wall and stick up
+; the full tile height
+;----------------------------------------------------------------
+; in:	edi = tx, esi = ty, edx = object id
+; out:	eax = 0/1/2/3 (FLAT / TREE / WALL_BOTTOM / WALL_TALL)
+;================================================================
+is_tall_object:
+	cmp edx, OBJ_TREE
+	je .tree
+
+	cmp edx, OBJ_STONE_WALL
+	je .wall
+	cmp edx, OBJ_WOOD_WALL
+	je .wall
+
+	; everything else - doors, beds, chairs, torches - is flat
+	xor eax, eax
+	ret
+
+.wall:
+	; S not a wall -> bottom-most, else tall
+	push rbx
+	push r12
+	push r13
+	mov ebx, edi			; tx
+	mov r12d, esi			; ty
+	mov r13d, edx			; obj id
+
+	mov edi, ebx
+	mov esi, r12d
+	inc esi					; ty+1
+	mov edx, r13d
+	call autotile_match_at
+	test eax, eax
+	jnz .wall_tall			; S is same wall -> tall
+
+	; S not wall -> bottom-most
+	mov eax, 2
+	pop r13
+	pop r12
+	pop rbx
+	ret
+
+.wall_tall:
+	mov eax, 3
+	pop r13
+	pop r12
+	pop rbx
+	ret
+
+.tree:
+	mov eax, 1
+	ret
+
+;================================================================
+; draw_objects
 ;================================================================
 draw_objects:
 	push rbp
@@ -1365,6 +1456,15 @@ draw_objects:
 	test r12d, r12d
 	jz .next_col
 
+	; skip tall objects in this pass - they'll be drawn later by
+	; draw_tall_objects so they always appear in front of entities
+	mov edi, [rbp-8]
+	mov esi, [rbp-4]
+	mov edx, r12d
+	call is_tall_object
+	test eax, eax
+	jnz .next_col
+
 	; --- dispatch: walls (stone & wood) are autotiled, others
 	; are static.  with the blob system stone walls no longer
 	; need a special "bottom-edge" path - blob has dedicated
@@ -1449,6 +1549,292 @@ draw_objects:
 	pop r12
 	pop rbx
 	leave
+	ret
+
+;================================================================
+; collect_visible_tall_tiles: build the y-sorted tall tile list
+;----------------------------------------------------------------
+; scans the visible tile region (same bounds as draw_objects) row
+; by row and records every tall object cell into tall_tile_list[].
+; because the scan is row-major, the resulting list is alreaddy
+; sorted ascending by ty - any ties (same row) sit next to each
+; other and can be drawn in any order since they don't overlap
+;
+; consumed during draw_entities, where each visible tall tile is
+; emitted just before the first entity whose y >= tile-top-y, so
+; the player & tall objects end up properly..interleaved? without
+; running an actual merge sort
+;----------------------------------------------------------------
+; in:	(no args; reads camera_x/y, objectmap)
+; out:	tall_tile_list filled, tall_tile_count = entry count
+;================================================================
+collect_visible_tall_tiles:
+	push rbp
+	mov rbp, rsp
+	sub rsp, 48
+	push rbx
+	push r12
+	push r13
+	push r14
+	push r15
+
+	; locals:
+	;	[rbp-4]  ty		[rbp-8]  tx
+	;	[rbp-12] count	(also written to tall_tile_count at exit)
+	;	[rbp-20] ty_min	[rbp-24] ty_max
+	;	[rbp-28] tx_min	[rbp-32] tx_max
+
+	; bounds - same clamp logic as draw_objects
+	mov eax, [camera_x]
+	cdq
+	mov ecx, TILE_SIZE
+	idiv ecx
+	test edx, edx
+	jns .ct_tx_min_ok
+	dec eax
+.ct_tx_min_ok:
+	dec eax
+	test eax, eax
+	jns .ct_tx_min_clamped
+	xor eax, eax
+.ct_tx_min_clamped:
+	mov [rbp-28], eax
+
+	mov eax, [camera_x]
+	add eax, WINDOW_W
+	cdq
+	mov ecx, TILE_SIZE
+	idiv ecx
+	add eax, 2
+	cmp eax, MAP_WIDTH
+	jle .ct_tx_max_ok
+	mov eax, MAP_WIDTH
+.ct_tx_max_ok:
+	mov [rbp-32], eax
+
+	mov eax, [camera_y]
+	cdq
+	idiv ecx
+	test edx, edx
+	jns .ct_ty_min_ok
+	dec eax
+.ct_ty_min_ok:
+	dec eax
+	test eax, eax
+	jns .ct_ty_min_clamped
+	xor eax, eax
+.ct_ty_min_clamped:
+	mov [rbp-20], eax
+
+	mov eax, [camera_y]
+	add eax, WINDOW_H
+	cdq
+	idiv ecx
+	add eax, 2
+	cmp eax, MAP_HEIGHT
+	jle .ct_ty_max_ok
+	mov eax, MAP_HEIGHT
+.ct_ty_max_ok:
+	mov [rbp-24], eax
+
+	xor r14d, r14d; count = 0
+
+	mov eax, [rbp-20]
+	mov [rbp-4], eax
+.ct_row:
+	mov eax, [rbp-4]
+	cmp eax, [rbp-24]
+	jge .ct_done
+
+	mov eax, [rbp-28]
+	mov [rbp-8], eax
+.ct_col:
+	mov eax, [rbp-8]
+	cmp eax, [rbp-32]
+	jge .ct_next_row
+
+	; obj_id, skip empty
+	mov eax, [rbp-4]
+	imul eax, MAP_WIDTH
+	add eax, [rbp-8]
+	mov r12d, eax	; r12 = cell index
+	lea rbx, [objectmap]
+	movzx r13d, byte [rbx + r12]
+	test r13d, r13d
+	jz .ct_next_col
+
+	; classify: 0=flat (skip), 1=tree (sort_y=ty*16),
+	; 2=wall_bottom (sort_y=ty*16+8), 3=wall_tall (sort_y=0xFFFF
+	; = always after all entities).  pack (sort_y<<16) | cell
+	mov edi, [rbp-8]
+	mov esi, [rbp-4]
+	mov edx, r13d
+	call is_tall_object
+	test eax, eax
+	jz .ct_next_col
+
+	cmp eax, 3
+	je .ct_sorty_tall
+
+	; tree (1) or wall_bottom (2): sort_y = ty*TILE_SIZE
+	; (plus TILE_SIZE/2 when bottom)
+	mov ecx, [rbp-4]
+	imul ecx, TILE_SIZE
+	cmp eax, 2
+	jne .ct_have_sorty
+	add ecx, TILE_SIZE / 2
+	jmp .ct_have_sorty
+
+.ct_sorty_tall:
+	; tall walls are "always above" - pick a sort_y larger than
+	; any entity could ever have:
+	mov ecx, 0xFFFF
+
+.ct_have_sorty:
+	; record into list (skip if at cap).  packed entry: sort_y in
+	; high 16 bits, cell index in low 16 bits
+	cmp r14d, TALL_TILE_MAX
+	jge .ct_next_col
+	shl ecx, 16
+	or ecx, r12d					; ecx = packed entry
+	lea rbx, [tall_tile_list]
+	mov [rbx + r14*4], ecx
+	inc r14d
+
+	; bubble back: within a row, tall (sort_y=ty*16) and bottom-
+	; most (sort_y=ty*16+8) can land out of order depending on
+	; left-to-right scan.  swap with the previous entry while it's
+	; greater using UNSIGNED compare since these packed values
+	; (sort_y 0xFFFF in high half) look negative as signed 32-bit
+	mov edx, r14d
+	dec edx						; edx = idx we just wrote
+.ct_bubble:
+	cmp edx, 0
+	jle .ct_bubble_done
+	mov esi, [rbx + rdx*4]		; current
+	mov edi, [rbx + rdx*4 - 4]	; previous
+	cmp edi, esi				; unsigned: sort_y dominates
+	jbe .ct_bubble_done			; prev <= current, in order
+	mov [rbx + rdx*4 - 4], esi
+	mov [rbx + rdx*4], edi
+	dec edx
+	jmp .ct_bubble
+.ct_bubble_done:
+
+.ct_next_col:
+	inc dword [rbp-8]
+	jmp .ct_col
+.ct_next_row:
+	inc dword [rbp-4]
+	jmp .ct_row
+.ct_done:
+	mov [tall_tile_count], r14d
+
+	pop r15
+	pop r14
+	pop r13
+	pop r12
+	pop rbx
+	leave
+	ret
+
+;================================================================
+; draw_tall_tile_one_idx: draw one tile from tall_tile_list
+;----------------------------------------------------------------
+; full-tile blit (not the half overlay) using whichever picker
+; matches the object type
+; same dispatch as draw_objects
+;----------------------------------------------------------------
+; in:	edi = list index into tall_tile_list (0..tall_tile_count-1)
+;		rsi = atlas texture ptr
+;================================================================
+draw_tall_tile_one_idx:
+	push rbp
+	mov rbp, rsp
+	push rbx
+	push r12
+	push r13
+	sub rsp, 24	; locals; 3 pushes + 24 keeps rsp 16-aligned at calls
+
+	; locals (rsp-relative; saved regs sit between these and rbp):
+	;	[rsp+0]   atlas tex ptr
+	;	[rsp+8]   ty
+	;	[rsp+12]  tx
+
+	mov [rsp+0], rsi			; atlas tex
+
+	; cell index from the list (entries are packed: sort_y high
+	; 16 bits, cell low 16 bits - mask off the sort_y)
+	lea rax, [tall_tile_list]
+	mov eax, [rax + rdi*4]		; packed entry
+	movzx eax, ax				; cell = low 16 bits
+	; tx = cell % MAP_WIDTH, ty = cell / MAP_WIDTH
+	xor edx, edx
+	mov ecx, MAP_WIDTH
+	div ecx
+	mov [rsp+8], eax			; ty
+	mov [rsp+12], edx			; tx
+
+	; obj id at this cell
+	mov eax, [rsp+8]
+	imul eax, MAP_WIDTH
+	add eax, [rsp+12]
+	lea rbx, [objectmap]
+	movzx r12d, byte [rbx + rax]
+
+	; dispatch to picker
+	cmp r12d, OBJ_WOOD_WALL
+	je .dt_auto
+	cmp r12d, OBJ_STONE_WALL
+	je .dt_auto
+
+	; trees/future tall non-auto types go via the nonauto picker,
+	; same as draw_objects
+	mov edi, [rsp+12]
+	mov esi, [rsp+8]
+	mov edx, r12d
+	call nonauto_pick_slot_object
+	jmp .dt_have_slot
+
+.dt_auto:
+	mov edi, [rsp+12]
+	mov esi, [rsp+8]
+	mov edx, r12d
+	call autotile_pick_slot
+.dt_have_slot:
+	mov r13d, eax; slot
+
+	; slot -> src_x, src_y in atlas pixels
+	mov rdi, [rsp+0]
+	mov eax, r13d
+	xor edx, edx
+	mov ecx, ATLAS_COLS
+	div ecx
+	imul edx, TILE_SIZE
+	imul eax, TILE_SIZE
+	mov esi, edx				; src_x
+	mov edx, eax				; src_y
+	mov ecx, TILE_SIZE			; src_w
+	mov r8d, TILE_SIZE			; src_h
+	mov r9d, [rsp+12]
+	imul r9d, TILE_SIZE
+	sub r9d, [camera_x]			; dst_x
+
+	mov eax, [rsp+8]
+	imul eax, TILE_SIZE
+	sub eax, [camera_y]			; dst_y
+	mov r10, 0xFFFF00FF
+	push r10
+	push 0						; flip
+	push rax					; dst_y
+	call blit_texture_rect_keyed
+	add rsp, 24
+
+	add rsp, 24
+	pop r13
+	pop r12
+	pop rbx
+	pop rbp
 	ret
 
 %endif

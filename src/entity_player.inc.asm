@@ -945,6 +945,13 @@ draw_entities:
 
 	call entity_sort_draw_order
 
+	; collect visible tall objects into the y-sorted list.
+	; we'll flush each one into the framebuffer just before the 1st
+	; entity whose entity.y >= tile-top-y, which makes trees/etc
+	; work with NPCs
+	call collect_visible_tall_tiles
+	mov qword [rsp+8], 0			; tall_idx = 0
+
 	mov r14d, [entity_count]
 	xor r15d, r15d					; loop idx
 .next:
@@ -962,6 +969,32 @@ draw_entities:
 	movzx eax, byte [r13 + ENT_FLAGS_OFFSET]
 	test eax, ENT_FLAG_ALIVE
 	jz .skip
+
+	; --- flush tall tiles whose sort_y <= this entity's y ---
+	; list entries are packed: sort_y in high 16 bits, cell index
+	; in low 16.  draining halts when the next tile would sort
+	; after this entity
+.flush_tall:
+	mov ecx, [rsp+8]				; ecx = tall_idx
+	cmp ecx, [tall_tile_count]
+	jge .flush_done
+
+	; reload entity.y every iter - rax/rcx/rdx are all caller-
+	; saved so the draw call below clobbers any value we'd kept
+	mov eax, [r13 + ENT_Y_OFFSET]
+	lea rdx, [tall_tile_list]
+	mov edx, [rdx + rcx*4]			; edx = packed entry
+	shr edx, 16						; edx = sort_y
+	cmp edx, eax
+	jg .flush_done					; tile.sort_y > entity.y ->later
+
+	mov edi, [rsp+8]				; tall_idx for the callee
+	lea rsi, [atlas_tex] 
+	call draw_tall_tile_one_idx
+
+	inc dword [rsp+8]				; tall_idx++
+	jmp .flush_tall
+.flush_done:
 
 	; shadow ellipse under entity before sprite
 	mov edi, [r13 + ENT_X_OFFSET]
@@ -1053,6 +1086,30 @@ draw_entities:
 .pp_up:
 	add r12d, 1
 	movzx ecx, byte [r13 + ENT_PHASE_OFFSET]
+	jmp .pose_done
+
+.non_walk_col:
+	; non-walk row: col 0/1/2, no phase, right flips col 2
+	cmp eax, FACE_DOWN
+	je .nw_down
+	cmp eax, FACE_UP
+	je .nw_up
+	cmp eax, FACE_LEFT
+	je .nw_left
+	; right: col 2 flipped
+	add r12d, 2
+	mov ecx, 1
+	jmp .pose_done
+.nw_left:
+	add r12d, 2
+	xor ecx, ecx
+	jmp .pose_done
+.nw_down:
+	xor ecx, ecx
+	jmp .pose_done
+.nw_up:
+	add r12d, 1
+	xor ecx, ecx
 .pose_done:
 
 	; pose row was stashed at [rsp].  multiply by SPRITE_SIZE to get
@@ -1123,7 +1180,21 @@ draw_entities:
 	inc r15d
 	jmp .next
 .done:
-	add rsp, 8
+	; --- drain any remaining tall tiles south of every entity ---
+	; (entities ran out but some tall objects haven't been drawn
+	; yet - they all sort south of the southernmost entity)
+.drain_tall:
+	mov ecx, [rsp+8]
+	cmp ecx, [tall_tile_count]
+	jge .drain_done
+	mov edi, ecx
+	lea rsi, [atlas_tex]
+	call draw_tall_tile_one_idx
+	inc dword [rsp+8]
+	jmp .drain_tall
+.drain_done:
+
+	add rsp, 24
 	pop r15
 	pop r14
 	pop r13
