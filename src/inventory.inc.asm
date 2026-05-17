@@ -1654,8 +1654,19 @@ place_at_mouse:
 	mov esi, r12d
 	call object_at
 	test eax, eax
-	jz .ok				; nothing there
+	jz .obj_ok			; nothing there
 	jmp .fail			; tree, wall, door, furniture - blocks
+.obj_ok:
+	; ground clear, object slot clear - last gate: don't drop a wall
+	; on top of an entity, or we'd trap them (and ourselves on floor
+	; tiles too, which the bed/chair would silently block).
+	; tile_has_entity walks the table and returns 1 if anyone alive
+	; is standing here
+	mov edi, ebx
+	mov esi, r12d
+	call tile_has_entity
+	test eax, eax
+	jnz .fail			; npc or player on the tile
 
 .ok:
 	; resolve item -> tile/object id
@@ -1780,6 +1791,12 @@ place_draw_cursor:
 	call object_at
 	test eax, eax
 	jnz .have_colour		; anything in objectmap blocks
+	; ground + object both clear - last gate is "no entity here"
+	mov edi, ebx
+	mov esi, r12d
+	call tile_has_entity
+	test eax, eax
+	jnz .have_colour		; npc or player standing here
 .ok_colour:
 	mov r13d, 0xFF40E060	; green
 .have_colour:
