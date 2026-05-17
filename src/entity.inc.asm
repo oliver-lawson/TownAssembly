@@ -538,6 +538,12 @@ entity_try_open_door_in_dir:
 	pop rbx
 	ret
 
+; if an npc gets this close to the hub (chebyshev tiles), the
+; wander tick stops using the flow field and just picks a random
+; direction.  prevents the pile-up where everyone tries to step
+; onto the single hub tile and clogs the collision pushback
+%define HUB_DISPERSE_RADIUS	4
+
 ;================================================================
 ; entity_wander_tick: per-frame AI for a single wander-style entity
 ;----------------------------------------------------------------
@@ -576,6 +582,46 @@ entity_wander_tick:
 	;	hero	-> 70% flow field, 30% random
 	;	monster	-> 20% flow field, 80% random
 	;	other	-> 100% random TMP
+
+	; -- close to the hub? skip the flow field entirely --
+	; once we're "home" the flow field would just keep pulling us
+	; onto the single hub tile, where everyone piles up. by going
+	; full random inside the disperse radius we mill about instead
+	mov eax, [r13 + ENT_X_OFFSET]
+	mov ecx, TILE_SIZE
+	cdq
+	idiv ecx
+	test edx, edx
+	jns .hd_x_ok
+	dec eax
+.hd_x_ok:
+	sub eax, [hub_tx]
+	test eax, eax
+	jns .hd_dx_pos
+	neg eax
+.hd_dx_pos:
+	mov r8d, eax				; |dx|
+
+	mov eax, [r13 + ENT_Y_OFFSET]
+	cdq
+	idiv ecx
+	test edx, edx
+	jns .hd_y_ok
+	dec eax
+.hd_y_ok:
+	sub eax, [hub_ty]
+	test eax, eax
+	jns .hd_dy_pos
+	neg eax
+.hd_dy_pos:
+	; cheb = max(|dx|, |dy|)
+	cmp eax, r8d
+	jge .hd_have
+	mov eax, r8d
+.hd_have:
+	cmp eax, HUB_DISPERSE_RADIUS
+	jle .pick_random			; close to home - wander randomly
+
 	mov edi, 100
 	call rng_range
 	; eax in [0, 100).  bias threshold depends on type

@@ -131,6 +131,9 @@ main:
 								; any splat or any blood_clear
 	call blood_clear			; no blood on a fresh world
 	call spawn_reset
+	; starting heroes - 3 of them around the hub.  needs safezone
+	; (heroes only spawn on lit tiles) so happens AFTER recompute
+	call spawn_starting_heroes
 
 	; CHEAT: give starting items so I don't have to keep crafting..
 	mov word [inv_item_count + ITEM_TORCH * 2], 12
@@ -589,6 +592,7 @@ restart_world:
 	call pathing_recompute
 	call blood_clear
 	call spawn_reset
+	call spawn_starting_heroes
 	lea rdi, [log_msg_restart]
 	call debug_log
 	pop rbp
