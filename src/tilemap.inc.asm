@@ -61,8 +61,8 @@
 %define TILEMAP_INC
 
 %define TILE_SIZE 16
-%define MAP_WIDTH 80	; 80*16 = 1280 px wide, 2x WINDOW_W
-%define MAP_HEIGHT 60	; 60*16 = 960 px tall,  2x WINDOW_H
+%define MAP_WIDTH 160	; 160*16 = 2560 px wide, 8x WINDOW_W
+%define MAP_HEIGHT 120	; 120*16 = 1920 px tall, ~8x WINDOW_H
 
 ; tile IDs - matches what the world stores in tilemap[]
 %define TILE_GRASS				0
