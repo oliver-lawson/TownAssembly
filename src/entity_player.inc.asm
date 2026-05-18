@@ -390,6 +390,15 @@ try_player_action:
 	; rsp at this point: 5 callee-saves (40) + ret (8) = 48 aligned,
 	; with no extra subq.  call directly, no padding needed
 	call blood_splat_at_pixel
+	; spawn damage number floats above the corpse - spawn b4 kill
+	; while we can still read x/y; rax was trashed by the call so
+	; re-grab the entity ptr
+	mov edi, r15d
+	call entity_ptr
+	mov edi, [rax + ENT_X_OFFSET]
+	mov esi, [rax + ENT_Y_OFFSET]
+	mov edx, HIT_DAMAGE
+	call spawn_dmgfloat
 	mov edi, r15d
 	call entity_kill
 	inc word [player_res_gold]
@@ -403,6 +412,14 @@ try_player_action:
 	mov edi, [rax + ENT_X_OFFSET]
 	mov esi, [rax + ENT_Y_OFFSET]
 	call blood_splat_at_pixel
+	; spawn damage number floats above the victim - rax was trashed,
+	; regrab the entity ptr to re-read x/y
+	mov edi, r15d
+	call entity_ptr
+	mov edi, [rax + ENT_X_OFFSET]
+	mov esi, [rax + ENT_Y_OFFSET]
+	mov edx, HIT_DAMAGE
+	call spawn_dmgfloat
 	jmp .out
 
 .next_scan:
