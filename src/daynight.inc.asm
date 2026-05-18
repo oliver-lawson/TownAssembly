@@ -72,9 +72,18 @@
 ; do some better offscreening for larger areas before that anyway
 %define SHADOW_PROJECT_DIST	(TORCH_OUTER_RADIUS * 2)
 
+; chance (out of 100) the night becomes a siege
+; siege nights spike the monster homing bias (see entity_inc.asm)
+; so they push toward the hub for an attack wave
+%define SIEGE_NIGHT_CHANCE			30
+
 section .bss
 	alignb 4
 	day_clock		resd 1
+	; 1 = siege night, monsters will push toward hub.
+	; rolled at dusk-start, cleared at dawn. read by wander_tick
+	; in entity_inc.asm
+	siege_active	resb 1
 	; per-frame darkness amounts (set once, used by tint pass)
 	night_sub_r		resd 1
 	night_sub_g 	resd 1
@@ -108,6 +117,11 @@ section .bss
 	debug_max_occ_count	resd 1 ; max torch occluders this frame
 
 section .data
+	; siege state floattext.  rolled at the day->dusk crossing,
+	; cleared at the dawn->day wraparound
+	log_msg_siege_on	db "the horde approaches!", 0
+	log_msg_siege_off	db "the horde goes home for tea", 0
+
 	align 16
 	bayer4x4edged:
 	;orig
@@ -142,6 +156,17 @@ section .data
 section .text
 
 ;================================================================
+; daynight_tick: increment the day clock + manage the siege flag
+;----------------------------------------------------------------
+; the clock wraps at DAY_CYCLE_LEN
+;	day_clock == DAY_END		(day->dusk transition)
+;		roll the siege dice; on success monsters will attack hub
+;	day_clock wrapped to 0		(dawn->day transition)
+;		clear the siege flag and announce the calm
+;
+; both edges fire exactly once per cycle because we test right
+; after the inc, before any further state can change
+;================================================================
 daynight_tick:
 	mov eax, [day_clock]
 	inc eax
@@ -150,10 +175,43 @@ daynight_tick:
 	xor eax, eax
 .no_wrap:
 	mov [day_clock], eax
+
+	; --- dusk edge: clock just hit DAY_END ---
+	cmp eax, DAY_END
+	jne .check_dawn
+	push rax					; preserve eax/clock across call
+	mov edi, 100
+	call rng_range
+	cmp eax, SIEGE_NIGHT_CHANCE
+	jge .siege_skip
+	mov byte [siege_active], 1
+	lea rdi, [log_msg_siege_on]
+	call debug_log
+	jmp .pop_eax
+.siege_skip:
+	; nothing to log, quiet..
+	mov byte [siege_active], 0
+.pop_eax:
+	pop rax
+
+.check_dawn:
+	; --- dawn edge: clock just wrapped to 0 ---
+	; if the night was a siege, announce the calm
+	test eax, eax
+	jnz .out
+	cmp byte [siege_active], 0
+	je .out
+	mov byte [siege_active], 0
+	sub rsp, 8 ; align (entry rsp%16=8 -> 0)
+	lea rdi, [log_msg_siege_off]
+	call debug_log
+	add rsp, 8
+.out:
 	ret
 
 daynight_reset:
 	mov dword [day_clock], 0
+	mov byte [siege_active], 0
 	ret
 
 ;================================================================

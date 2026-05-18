@@ -27,8 +27,8 @@
 %define SPAWN_INC
 
 %define MONSTER_CAP				64
-%define HERO_CAP				16
-%define SPAWN_TICK_PERIOD		2;20;120
+%define HERO_CAP				32
+%define SPAWN_TICK_PERIOD		20;120
 %define SPAWN_RETRIES			16	; per attempt
 
 ; min chebyshev distance from hub for monster spawns - gives us
@@ -38,6 +38,9 @@
 ; darkness gate for monsters (0=day, 255=night).  > this lets them
 ; come out at dusk/night.  matches daynight_get_darkness output
 %define SPAWN_MONSTER_NIGHT_THRESHOLD	40
+
+; on non-siege nights, this % of monster-spawn attempts try to fire
+%define SPAWN_QUIET_MONSTER_CHANCE		25
 
 ; hero spawn search box around hub - keeps them appearing near the
 ; player rather than scattered round huge dark map
@@ -551,6 +554,14 @@ spawn_tick:
 	call daynight_get_darkness
 	cmp eax, SPAWN_MONSTER_NIGHT_THRESHOLD
 	jle .out					; too bright; no monster spawn
+	; quiet or siege night?
+	cmp byte [siege_active], 0
+	jne .can_monster_spawn
+	mov edi, 100
+	call rng_range
+	cmp eax, SPAWN_QUIET_MONSTER_CHANCE
+	jge .out
+.can_monster_spawn:
 	mov edi, ENT_TYPE_MONSTER
 	call count_alive_of_type
 	cmp eax, MONSTER_CAP
