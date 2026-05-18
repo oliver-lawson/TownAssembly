@@ -1731,6 +1731,9 @@ place_at_mouse:
 	; rebuild the gameplay safezone mask and the hub flow field
 	call safezone_recompute
 	call pathing_recompute
+	; placement might have closed off a room or filled one in -
+	; rebuild room map + capacities
+	call rooms_recompute
 	mov eax, 1
 	pop r12
 	pop rbx

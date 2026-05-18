@@ -647,6 +647,7 @@ tree_regrowth_tick:
 	sub rsp, 8
 	call safezone_recompute
 	call pathing_recompute
+	call rooms_recompute
 	add rsp, 8
 	jmp .out
 

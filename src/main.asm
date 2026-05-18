@@ -27,6 +27,7 @@ default rel
 %include "safezone.inc.asm"
 %include "bloodmap.inc.asm"
 %include "spawn.inc.asm"
+%include "room.inc.asm"
 %include "input.inc.asm"
 
 section .data
@@ -48,7 +49,7 @@ section .data
 	hud_label_fps		db "fps", 0
 	hud_label_iters		db "iters", 0
 	hud_label_seed		db "seed", 0
-	hud_help			db "` console F3 hud F5 restart F6 safezone F7 flowmap i inv 1-5 hotbar", 0
+	hud_help			db "` console F3 hud F5 restart F6 safezone F7 flowmap F8 rooms i inv 1-5 hotbar", 0
 
 	; log messages
 	log_msg_started		db 0x1, " world generated! ", 0x3, 0
@@ -131,6 +132,7 @@ main:
 								; any splat or any blood_clear
 	call blood_clear			; no blood on a fresh world
 	call spawn_reset
+	call rooms_recompute
 	; starting heroes - 3 of them around the hub.  needs safezone
 	; (heroes only spawn on lit tiles) so happens AFTER recompute
 	call spawn_starting_heroes
@@ -339,6 +341,9 @@ main:
 	call daynight_apply_tint
 	call daynight_draw_all_torches
 
+	; room brighten - tiles inside an enclosed room read brighter
+	call rooms_draw_brighten
+
 	; safezone debug overlay (F6) - tints dark tiles.  drawn after
 	; daynight so it reads correctly against any tinted world, but
 	; before HUD so it doesn't bleed under the UI
@@ -351,6 +356,9 @@ main:
 	; F7 also shows planned A* paths as a chain of dots per npc.
 	; drawn after the flow-field arrows so the dots sit on top
 	call astar_draw_paths_debug
+
+	; room debug overlay (F8) - colourised room tiles + edges
+	call rooms_draw_debug
 
 	; bottom HUD bar
 	call draw_hud_bar
@@ -592,6 +600,7 @@ restart_world:
 	call pathing_recompute
 	call blood_clear
 	call spawn_reset
+	call rooms_recompute
 	call spawn_starting_heroes
 	lea rdi, [log_msg_restart]
 	call debug_log
