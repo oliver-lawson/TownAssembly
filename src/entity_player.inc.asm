@@ -456,6 +456,9 @@ try_player_action:
 	; gameplay safezone mask and the hub flow field
 	call safezone_recompute
 	call pathing_recompute
+	; chopping a tree or digging a wall can break a room boundary
+	; (or, less often, create a new one).  rebuild room map
+	call rooms_recompute
 	; fallthrough to .out
 
 .out:
