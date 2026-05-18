@@ -54,6 +54,8 @@ draw_hud_bar:
 	call fill_rect
 
 	; --- entries: icon at icon_x, number 10px to its right ---
+	; 6 entries packed at 46px stride to fit on a 320-wide bar
+	;	2, 48, 94, 140, 186, 232 - last is pop/cap with 2 numbers
 	; HP - icon slot 0
 	mov edi, 2
 	xor esi, esi
@@ -63,36 +65,44 @@ draw_hud_bar:
 	call hud_print_int
 
 	; wood - icon slot 1
-	mov edi, 64
+	mov edi, 48
 	mov esi, 1
 	call hud_blit_icon
-	mov edi, 74
+	mov edi, 58
 	movzx ecx, word [player_res_wood]
 	call hud_print_int
 
 	; stone - icon slot 2
-	mov edi, 128
+	mov edi, 94
 	mov esi, 2
 	call hud_blit_icon
-	mov edi, 138
+	mov edi, 104
 	movzx ecx, word [player_res_stone]
 	call hud_print_int
 
 	; food - icon slot 3
-	mov edi, 192
+	mov edi, 140
 	mov esi, 3
 	call hud_blit_icon
-	mov edi, 202
+	mov edi, 150
 	movzx ecx, word [player_res_food]
 	call hud_print_int
 
 	; gold - icon slot 4
-	mov edi, 256
+	mov edi, 186
 	mov esi, 4
 	call hud_blit_icon
-	mov edi, 266
+	mov edi, 196
 	movzx ecx, word [player_res_gold]
 	call hud_print_int
+
+	; housing pop/cap - icon slot 5.  pop = live hero count,
+	; cap = sum of room capacities.  HUD reads "3/5" style
+	mov edi, 232
+	mov esi, 5
+	call hud_blit_icon
+	mov edi, 242
+	call hud_print_housing
 
 	pop rbp
 	ret
@@ -136,6 +146,91 @@ hud_print_int:
 	mov esi, HUD_Y
 	mov edx, HUD_TEXT_COLOUR
 	jmp debug_print_int
+
+;================================================================
+; hud_print_housing: print "<pop>/<cap>" at (edi, HUD_Y)
+;----------------------------------------------------------------
+; in:	edi = x
+;----------------------------------------------------------------
+; stack: rbp frame + rbx + r12 = 24 + sub 48 + ret 8 = 80, aligned.
+; the 48-byte locals area holds:
+;	[rsp+0..11]		pop value as 12-byte int_to_str buf
+;	[rsp+12..23]	cap value as 12-byte int_to_str buf
+;	[rsp+24..25]	"/" + null
+;	[rsp+32..35]	stashed text colour
+;	the int_to_str routine writes right-justified ending at offset
+;	+11 of its passed buffer pointer
+;================================================================
+hud_print_housing:
+	push rbp
+	mov rbp, rsp
+	push rbx
+	push r12
+	sub rsp, 48					; rbp+rbx+r12=24 +48 +ret 8 = 80, aligned
+
+	mov ebx, edi				; starting x
+
+	; --- pop = live hero count ---
+	mov edi, ENT_TYPE_HERO
+	call count_alive_of_type
+	mov r12d, eax				; stash pop
+
+	; --- cap = sum of room capacities ---
+	call room_total_capacity
+	; eax = cap, r12d = pop
+
+	; pick colour
+	mov edx, HUD_TEXT_COLOUR
+	cmp r12d, eax
+	jle .colour_ok
+	mov edx, 0xFFFF6060			; red
+.colour_ok:
+	mov [rsp + 32], edx			; stash colour for the calls below
+
+	; --- print pop ---
+	mov edi, r12d
+	lea rsi, [rsp + 0]
+	call int_to_str
+	; rax = first char of pop's string.  compute digit count heere
+	; before debug_print clobbers rax.  null is at rsp+11
+	lea rcx, [rsp + 11]
+	sub rcx, rax				; rcx = digit count
+	imul ecx, DEBUG_GLYPH_W
+	mov r12d, ecx ; stash pixel advance (r12 free)
+	mov edi, ebx
+	mov esi, HUD_Y
+	mov edx, [rsp + 32]
+	mov rcx, rax
+	call debug_print
+	add ebx, r12d				; advance ebx
+
+	; --- '/' separator ---
+	; build a 2-char string / + null at [rsp + 24]
+	mov byte [rsp + 24], '/'
+	mov byte [rsp + 25], 0
+	mov edi, ebx
+	mov esi, HUD_Y
+	mov edx, [rsp + 32]
+	lea rcx, [rsp + 24]
+	call debug_print
+	add ebx, DEBUG_GLYPH_W
+
+	; --- print cap ---
+	call room_total_capacity
+	mov edi, eax
+	lea rsi, [rsp + 12]
+	call int_to_str
+	mov edi, ebx
+	mov esi, HUD_Y
+	mov edx, [rsp + 32]
+	mov rcx, rax
+	call debug_print
+
+	add rsp, 48
+	pop r12
+	pop rbx
+	pop rbp
+	ret
 
 ;================================================================
 ; draw_hotbar

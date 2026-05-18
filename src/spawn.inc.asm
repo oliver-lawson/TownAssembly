@@ -563,6 +563,13 @@ spawn_tick:
 	call count_alive_of_type
 	cmp eax, HERO_CAP
 	jge .out
+	; -- housing gate --
+	; allow the primary heroes but then don't let any more spawn til
+	; we build some housing
+	mov r8d, eax				; stash live hero count
+	call room_total_capacity
+	cmp r8d, eax
+	jge .out					; pop >= cap, no vacancy
 	call try_spawn_hero
 
 .out:
