@@ -19,6 +19,7 @@ default rel
 %include "daynight.inc.asm"
 %include "worldgen.inc.asm"
 %include "debug.inc.asm"
+%include "dmgfloat.inc.asm"
 %include "console.inc.asm"
 %include "inventory.inc.asm"
 %include "hud.inc.asm"
@@ -290,6 +291,9 @@ main:
 
 	; tick the floating text overlay (fade/lift)
 	call floattext_tick
+	; same for the combat damage floats - kept separate because the
+	; player one is a single slot, dmgfloats are a ring buffer
+	call dmgfloat_tick
 
 	; tick the status line fade
 	call status_tick
@@ -343,6 +347,10 @@ main:
 
 	; room brighten - tiles inside an enclosed room read brighter
 	call rooms_draw_brighten
+
+	; combat damage numbers - drawn over the tint so they remain
+	; readable through night gloom and shadowed areas
+	call dmgfloat_draw_all
 
 	; safezone debug overlay (F6) - tints dark tiles.  drawn after
 	; daynight so it reads correctly against any tinted world, but
@@ -599,6 +607,7 @@ restart_world:
 	call safezone_recompute		; mask is fresh after regen
 	call pathing_recompute
 	call blood_clear
+	call dmgfloat_clear
 	call spawn_reset
 	call rooms_recompute
 	call spawn_starting_heroes

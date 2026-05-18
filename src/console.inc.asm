@@ -17,6 +17,9 @@ section .data
 	cmd_name_quit		db "quit", 0
 	cmd_name_set		db "set", 0
 	cmd_name_help		db "help", 0
+	cmd_name_siege		db "siege", 0
+	cmd_name_spawnrate	db "spawn_rate", 0
+	cmd_name_cap		db "cap", 0
 
 	; command table: pairs of (name_ptr, handler_ptr),NULL-terminated
 	; the order is the order 'help' lists them in
@@ -26,6 +29,9 @@ section .data
 		dq cmd_name_restart,	cmd_handler_restart_fn
 		dq cmd_name_hud,		cmd_handler_hud_fn
 		dq cmd_name_set,		cmd_handler_set_fn
+		dq cmd_name_siege,		cmd_handler_siege_fn
+		dq cmd_name_spawnrate,	cmd_handler_spawnrate_fn
+		dq cmd_name_cap,		cmd_handler_cap_fn
 		dq cmd_name_quit,		cmd_handler_quit_fn
 		dq 0, 0	; sentinel
 
@@ -56,6 +62,14 @@ section .data
 	cmd_set_bad_value	db "bad value", 0
 	cmd_prompt			db "> ", 0
 	cmd_help_hint		db "type help for commands", 0
+
+	cmd_siege_usage		db "usage: siege on|off|toggle", 0
+	cmd_siege_on		db "siege forced on", 0
+	cmd_siege_off		db "siege forced off", 0
+	cmd_spawnrate_usage	db "usage: spawn_rate <frames>", 0
+	cmd_spawnrate_min	db "spawn rate too low (min 1)", 0
+	cmd_cap_usage		db "usage: cap <max monsters>", 0
+	cmd_cap_max			db "cap too high (max 999)", 0
 
 section .bss
 	alignb 4
@@ -422,24 +436,229 @@ cmd_handler_quit_fn:
 	mov byte [key_quit], 1
 	ret
 
-; help - list all commands available
+; siege on|off|toggle
+cmd_handler_siege_fn:
+	push rbp
+	mov rbp, rsp
+	push rbx
+	sub rsp, 8					; rbp+rbx+ret = 24 + 8 = 32, aligned
+	mov rbx, rdi				; save start-of-args - word_match
+								; advances rdi on success, so we
+								; reset between attempts
+	call skip_ws
+	cmp byte [rdi], 0
+	je .usage
+	mov rbx, rdi
+
+	; try each literal.  word_match preserves rdi on miss (pops it
+	; back), advances on hit - we don't need the advance so we just
+	; check the return code and route by .on/.off/.toggle
+	mov rsi, .lit_toggle
+	call word_match
+	test eax, eax
+	jnz .toggle
+	mov rdi, rbx
+	mov rsi, .lit_on
+	call word_match
+	test eax, eax
+	jnz .on
+	mov rdi, rbx
+	mov rsi, .lit_off
+	call word_match
+	test eax, eax
+	jnz .off
+	jmp .usage
+
+.toggle:
+	xor byte [siege_active], 1
+	cmp byte [siege_active], 0
+	jne .on_log
+	jmp .off_log
+.on:
+	mov byte [siege_active], 1
+	jmp .on_log
+.off:
+	mov byte [siege_active], 0
+	jmp .off_log
+
+.on_log:
+	lea rdi, [cmd_siege_on]
+	call debug_log
+	jmp .done
+.off_log:
+	lea rdi, [cmd_siege_off]
+	call debug_log
+	jmp .done
+
+.usage:
+	lea rdi, [cmd_siege_usage]
+	call debug_log
+.done:
+	add rsp, 8
+	pop rbx
+	pop rbp
+	ret
+
+section .data
+.lit_on		db "on", 0
+.lit_off	db "off", 0
+.lit_toggle	db "toggle", 0
+section .text
+
+; spawn_rate N - sets spawn_tick_period (frames between attempts)
+cmd_handler_spawnrate_fn:
+	push rbp
+	mov rbp, rsp
+	push r13
+	sub rsp, 8					; rbp+r13+ret=24 + 8 = 32, aligned
+	call skip_ws
+	cmp byte [rdi], 0
+	je .usage
+	call atoi_word
+	test cl, cl
+	jz .usage
+	; floor at 1
+	test eax, eax
+	jg .ok
+	lea rdi, [cmd_spawnrate_min]
+	call debug_log
+	jmp .done
+.ok:
+	mov [spawn_tick_period], eax
+	; log "ok: spawn_rate = N" via the same scratch pattern as 'set'
+	mov r13d, eax
+	lea rsi, [cmd_name_spawnrate]
+	call cmd_log_set_ok
+	jmp .done
+.usage:
+	lea rdi, [cmd_spawnrate_usage]
+	call debug_log
+.done:
+	add rsp, 8
+	pop r13
+	pop rbp
+	ret
+
+; cap N - sets monster_cap
+cmd_handler_cap_fn:
+	push rbp
+	mov rbp, rsp
+	push r13
+	sub rsp, 8					; align
+	call skip_ws
+	cmp byte [rdi], 0
+	je .usage
+	call atoi_word
+	test cl, cl
+	jz .usage
+	; clamp upper
+	cmp eax, 999
+	jle .ok
+	lea rdi, [cmd_cap_max]
+	call debug_log
+	jmp .done
+.ok:
+	mov [monster_cap], eax
+	mov r13d, eax
+	lea rsi, [cmd_name_cap]
+	call cmd_log_set_ok
+.done:
+	add rsp, 8
+	pop r13
+	pop rbp
+	ret
+.usage:
+	lea rdi, [cmd_cap_usage]
+	call debug_log
+	jmp .done
+
+; help - list all commands available, two per row
+;----------------------------------------------------------------
+; output looks like:
+;	commands:
+;	help		restart
+;	hud			set
+;	siege		spawn_rate
+;	cap			quit
+; each row is built into console_log_scratch as
+;	"left_name<padding>right_name\0"
+; the loop walks cmd_table 2 entries at a time.  on a final odd
+; entry, just log it alone
+;----------------------------------------------------------------
+%define HELP_COL_WIDTH		15	; chars before column 2 starts
 cmd_handler_help_fn:
 	push rbx
+	push r12
+	push r13
+	; 3 callee saves + ret = 32, aligned
 	; header
 	lea rdi, [cmd_help_header]
 	mov esi, 0xFFFFD060
 	call debug_log_col
+
 	lea rbx, [cmd_table]
 .loop:
-	mov rdi, [rbx]
-	test rdi, rdi
+	mov r12, [rbx]				; left name ptr
+	test r12, r12
 	jz .done
-	; each command name
+	mov r13, [rbx + 16]			; right name ptr (may be NULL)
+
+	; build the row: left in cols 0..HELP_COL_WIDTH-1, right after
+	lea rdi, [console_log_scratch]
+	mov rsi, r12
+	; copy left name
+.cp_left:
+	mov al, [rsi]
+	test al, al
+	jz .pad
+	mov [rdi], al
+	inc rdi
+	inc rsi
+	jmp .cp_left
+.pad:
+	; pad with spaces up to HELP_COL_WIDTH from the row start
+	lea rax, [console_log_scratch]
+	mov rcx, rdi
+	sub rcx, rax				; rcx = current col
+.pad_loop:
+	cmp ecx, HELP_COL_WIDTH
+	jge .right
+	mov byte [rdi], ' '
+	inc rdi
+	inc ecx
+	jmp .pad_loop
+.right:
+	; right name (if any).  null-terminate either way
+	test r13, r13
+	jz .term
+	mov rsi, r13
+.cp_right:
+	mov al, [rsi]
+	test al, al
+	jz .term
+	mov [rdi], al
+	inc rdi
+	inc rsi
+	jmp .cp_right
+.term:
+	mov byte [rdi], 0
+
+	lea rdi, [console_log_scratch]
 	mov esi, 0xFF80D0FF
 	call debug_log_col
+
+	; advance by one row if there was no right side (we're on the
+	; last entry before the sentinel), otherwise by two
+	test r13, r13
+	jz .one_step
+	add rbx, 32
+	jmp .loop
+.one_step:
 	add rbx, 16
 	jmp .loop
 .done:
+	pop r13
+	pop r12
 	pop rbx
 	ret
 

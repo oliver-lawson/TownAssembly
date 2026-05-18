@@ -1163,6 +1163,12 @@ ai_attack_tick:
 	sub rsp, 8 ; keepaligned
 	call blood_splat_at_pixel
 	add rsp, 8
+	; pop the damage number over the corpse before we kill it (kill
+	; clears flags, but we read x/y from r13 which is still valid)
+	mov edi, [r13 + ENT_X_OFFSET]
+	mov esi, [r13 + ENT_Y_OFFSET]
+	mov edx, ENGAGE_DAMAGE
+	call spawn_dmgfloat
 	movzx edi, byte [r12 + ENT_AI_TARGET_OFFSET]
 	call entity_kill
 	; clear our target
@@ -1178,6 +1184,11 @@ ai_attack_tick:
 	mov edi, [r13 + ENT_X_OFFSET]
 	mov esi, [r13 + ENT_Y_OFFSET]
 	call blood_splat_at_pixel
+	; damage number floats above the victim
+	mov edi, [r13 + ENT_X_OFFSET]
+	mov esi, [r13 + ENT_Y_OFFSET]
+	mov edx, ENGAGE_DAMAGE
+	call spawn_dmgfloat
 
 .out:
 	pop r13

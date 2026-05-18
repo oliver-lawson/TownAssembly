@@ -26,9 +26,9 @@
 %ifndef SPAWN_INC
 %define SPAWN_INC
 
-%define MONSTER_CAP				64
+%define MONSTER_CAP_DEFAULT		64
 %define HERO_CAP				32
-%define SPAWN_TICK_PERIOD		20;120
+%define SPAWN_TICK_PERIOD_DEFAULT	20;120
 %define SPAWN_RETRIES			16	; per attempt
 
 ; min chebyshev distance from hub for monster spawns - gives us
@@ -60,8 +60,13 @@ section .data
 
 section .bss
 	alignb 4
-	spawn_tick_counter		resd 1	; counts up to SPAWN_TICK_PERIOD
+	spawn_tick_counter		resd 1	; counts up to spawn_tick_period
 	spawn_alternator		resd 1	; 0 = monsters, 1 = heroes
+
+	; runtime-editable now! default to *_DEFAULT at spawn_reset,
+	; can be overridden via console commands (spawn_rate, cap):
+	spawn_tick_period		resd 1
+	monster_cap				resd 1
 
 section .text
 
@@ -71,6 +76,10 @@ section .text
 spawn_reset:
 	mov dword [spawn_tick_counter], 0
 	mov dword [spawn_alternator], 0
+	; editables back to defaults.  console commands can override
+	; these mid-game (they'll keep until next restart)
+	mov dword [spawn_tick_period], SPAWN_TICK_PERIOD_DEFAULT
+	mov dword [monster_cap], MONSTER_CAP_DEFAULT
 	ret
 
 ;================================================================
@@ -540,7 +549,8 @@ spawn_starting_heroes:
 ;================================================================
 spawn_tick:
 	inc dword [spawn_tick_counter]
-	cmp dword [spawn_tick_counter], SPAWN_TICK_PERIOD
+	mov eax, [spawn_tick_period]
+	cmp [spawn_tick_counter], eax
 	jl .out
 	mov dword [spawn_tick_counter], 0
 
@@ -564,7 +574,7 @@ spawn_tick:
 .can_monster_spawn:
 	mov edi, ENT_TYPE_MONSTER
 	call count_alive_of_type
-	cmp eax, MONSTER_CAP
+	cmp eax, [monster_cap]
 	jge .out
 	call try_spawn_monster
 	jmp .out
