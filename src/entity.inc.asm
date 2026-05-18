@@ -544,6 +544,12 @@ entity_try_open_door_in_dir:
 ; onto the single hub tile and clogs the collision pushback
 %define HUB_DISPERSE_RADIUS	4
 
+; darkness threshold above which monsters drop wander-mode and
+; commit to advancing on the hub (trying @ a bit below their spawn
+; threshold so existing monsters start pushing in just before
+; the spawn rate ramps up and siege doesn't come all at once)
+%define MONSTER_SIEGE_DARKNESS	30
+
 ;================================================================
 ; entity_wander_tick: per-frame AI for a single wander-style entity
 ;----------------------------------------------------------------
@@ -573,15 +579,17 @@ entity_wander_tick:
 
 	; pick new direction.  read the hub flow field for "homeward
 	; drift": heroes mostly head home when not engaged, monsters
-	; occasionally drift toward the hub to threaten the village.
-	;l
+	; advance on the hub at night
+	;
 	; if the flow field has no dir for this tile (unreachable, or at
 	; the hub itself), fall through to a random pick
 	;
 	; chance is per-type:
-	;	hero	-> 70% flow field, 30% random
-	;	monster	-> 20% flow field, 80% random
-	;	other	-> 100% random TMP
+	;	hero		70% flow field, 30% random (always)
+	;	monster:
+	;	  day		20% flow field - they mostly mill, day is calm
+	;	  night		85% flow field - they push toward the hub
+	;	other		100% random
 
 	; -- close to the hub? skip the flow field entirely --
 	; once we're "home" the flow field would just keep pulling us
@@ -624,7 +632,7 @@ entity_wander_tick:
 
 	mov edi, 100
 	call rng_range
-	; eax in [0, 100).  bias threshold depends on type
+	; eax in [0, 100).  bias threshold depends on type + time of day
 	mov ecx, 0			; default: never use flow field
 	movzx edx, byte [r13 + ENT_TYPE_OFFSET]
 	cmp edx, ENT_TYPE_HERO
@@ -634,7 +642,17 @@ entity_wander_tick:
 .not_hero_bias:
 	cmp edx, ENT_TYPE_MONSTER
 	jne .have_bias
-	mov ecx, 20
+	mov ecx, 20					; day-time monster bias
+	; bump to siege bias if we're dim enough.  pupshing rax so
+	; we don't clobber rng roll, also aligsn stack for the call
+	push rax
+	call daynight_get_darkness
+	pop rdx						; restore the rng roll into edx
+	cmp eax, MONSTER_SIEGE_DARKNESS
+	jle .monster_bias_day
+	mov ecx, 85					; night siege bias
+.monster_bias_day:
+	mov eax, edx				; rng roll back into eax for the cmp
 .have_bias:
 	cmp eax, ecx
 	jge .pick_random	; rng above threshold -> random
