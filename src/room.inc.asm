@@ -702,6 +702,11 @@ rooms_draw_brighten:
 	movzx eax, byte [rcx + rax]
 	test eax, eax
 	jz .col_next
+	; only brighten when this id furnished/can house someone
+	lea rcx, [room_capacity]
+	movzx eax, byte [rcx + rax]
+	test eax, eax
+	jz .col_next
 
 	; -- clip the tile rect to the framebuffer --
 	; sx = tx*TILE_SIZE - camera_x; sy similar
