@@ -33,7 +33,7 @@
 
 ; min chebyshev distance from hub for monster spawns - gives us
 ; a buffer to build out the base before they attack
-%define SPAWN_MONSTER_MIN_HUB_DIST	50
+%define SPAWN_MONSTER_MIN_HUB_DIST	20
 
 ; darkness gate for monsters (0=day, 255=night).  > this lets them
 ; come out at dusk/night.  matches daynight_get_darkness output
