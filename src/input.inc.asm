@@ -30,6 +30,10 @@ section .bss
 	key_safezone_pressed	resb 1	; F6: toggle safezone debug overlay
 	key_pathing_pressed		resb 1	; F7: toggle flow-field debug overlay
 	key_rooms_pressed		resb 1	; F8: toggle room debug overlay
+	; F1 toggles the help screen, SPACE starts the game from the title.
+	; both consumed by title_handle_input rather than dispatch_input
+	key_help_pressed	resb 1
+	key_start_pressed	resb 1
 	; hotbar select: 0 means nothing pressed, otherwise the digit
 	; pressed (1..N).  cleared after consumed
 	key_hotbar_digit	resb 1
@@ -96,6 +100,10 @@ process_sdl_events:
 	je .key_backspace
 	jmp .poll
 .console_closed_keys:
+	cmp eax, SCANCODE_F1
+	je .key_f1
+	cmp eax, SCANCODE_SPACE
+	je .key_space
 	cmp eax, SCANCODE_F3
 	je .key_f3
 	cmp eax, SCANCODE_F4
@@ -126,6 +134,12 @@ process_sdl_events:
 
 .key_escape:	; TMP - too easy to press when console open
 	mov byte [key_quit], 1
+	jmp .poll
+.key_f1:
+	mov byte [key_help_pressed], 1
+	jmp .poll
+.key_space:
+	mov byte [key_start_pressed], 1
 	jmp .poll
 .key_f3:
 	mov byte [key_toggle_pressed], 1

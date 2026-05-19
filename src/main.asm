@@ -30,6 +30,7 @@ default rel
 %include "spawn.inc.asm"
 %include "room.inc.asm"
 %include "input.inc.asm"
+%include "titlescreen.inc.asm"
 
 section .data
 	window_title		db "Town Assembly", 0
@@ -228,6 +229,24 @@ main:
 	; consume one-shot key flags + mouse wheel
 	call dispatch_input
 
+	; title/help screens consume F1 + SPACE.  if we're not in the
+	; playing state, we still advance the always-on tile_anim_ticks
+	; (so the title's blink + water/torches keep moving when we
+	; eventually unpause) and then skip the entire gameplay update,
+	; jumping straight to rendering.  the world is frozen but visible
+	call title_handle_input
+	call title_is_playing
+	test eax, eax
+	jnz .game_update
+	inc dword [tile_anim_ticks]
+	; clear any pending mouse clicks so they don't fire when we
+	; transition into gameplay
+	mov byte [mouse_l_clicked], 0
+	mov byte [mouse_r_clicked], 0
+	mov dword [mouse_wheel_dy], 0
+	jmp .post_update
+.game_update:
+
 	; while the inventory screen is up, route mouse clicks to it
 	; the world keeps ticking around the player; just suspend input
 	call inv_is_open
@@ -311,6 +330,7 @@ main:
 	mov byte [mouse_r_clicked], 0
 .keep_mouse_flags:
 
+.post_update:
 	; centre camera on player, clamped to world bounds
 	call camera_update
 
@@ -388,16 +408,23 @@ main:
 	jnz .skip_status_draw
 	call status_draw
 .skip_status_draw:
+	; title / help screen overlay - no-op when GS_PLAYING.  drawn
+	; over the world+hud but below the console so debug still works
+	call title_draw
+
 	; console panel last so it covers everything when open
 	call console_draw
 
 	; --- draw debug hud (if enabled & console isn't covering it) ---
-	; also skipped while inventory is open
+	; also skipped while inventory is open, or on the title/help screens
 	cmp byte [console_open], 0
 	jne .skip_hud_draw
 	call inv_is_open
 	test eax, eax
 	jnz .skip_hud_draw
+	call title_is_playing
+	test eax, eax
+	jz .skip_hud_draw
 	call is_debug_hud_enabled
 	test eax, eax
 	jz .skip_hud_draw
