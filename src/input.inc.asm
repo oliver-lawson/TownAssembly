@@ -27,6 +27,7 @@ section .bss
 	key_action_pressed	resb 1
 	key_inv_pressed		resb 1
 	key_close_pressed	resb 1
+	key_bloom_pressed	resb 1	; F2: toggle bloom post-fx
 	key_safezone_pressed	resb 1	; F6: toggle safezone debug overlay
 	key_pathing_pressed		resb 1	; F7: toggle flow-field debug overlay
 	key_rooms_pressed		resb 1	; F8: toggle room debug overlay
@@ -104,6 +105,8 @@ process_sdl_events:
 	je .key_f1
 	cmp eax, SCANCODE_SPACE
 	je .key_space
+	cmp eax, SCANCODE_F2
+	je .key_f2
 	cmp eax, SCANCODE_F3
 	je .key_f3
 	cmp eax, SCANCODE_F4
@@ -137,6 +140,9 @@ process_sdl_events:
 	jmp .poll
 .key_f1:
 	mov byte [key_help_pressed], 1
+	jmp .poll
+.key_f2:
+	mov byte [key_bloom_pressed], 1
 	jmp .poll
 .key_space:
 	mov byte [key_start_pressed], 1
@@ -218,6 +224,13 @@ process_sdl_events:
 dispatch_input:
 	push rbp
 	mov rbp, rsp
+
+	; --- F2: toggle bloom ---
+	cmp byte [key_bloom_pressed], 0
+	je .no_bloom
+	mov byte [key_bloom_pressed], 0
+	call bloom_toggle
+.no_bloom:
 
 	; --- F4: iterate worldgen CA ---
 	cmp byte [key_iterateworld_pressed], 0

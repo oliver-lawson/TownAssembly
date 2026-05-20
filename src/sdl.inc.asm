@@ -81,6 +81,7 @@ extern SDL_GetMouseState
 %define SCANCODE_ESCAPE		41
 %define SCANCODE_SPACE		44
 %define SCANCODE_F1  		58
+%define SCANCODE_F2  		59
 %define SCANCODE_F3  		60
 %define SCANCODE_F4  		61
 %define SCANCODE_F5  		62

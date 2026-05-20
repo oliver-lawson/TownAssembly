@@ -27,6 +27,7 @@ default rel
 %include "camera.inc.asm"
 %include "fps.inc.asm"
 %include "safezone.inc.asm"
+%include "bloom.inc.asm"
 %include "bloodmap.inc.asm"
 %include "spawn.inc.asm"
 %include "room.inc.asm"
@@ -474,6 +475,9 @@ main:
 
 	; bump frame_count, maybe re-sample FPS
 	call fps_tick
+
+	; post-fx pass (no-op if disabled)
+	call bloom_apply
 
 	; upload framebuffer to gpu texture
 	mov rdi, [sdl_texture]
