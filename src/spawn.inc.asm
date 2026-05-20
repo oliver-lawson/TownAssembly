@@ -194,6 +194,14 @@ try_spawn_monster_at:
 	cmp eax, SPAWN_MONSTER_MIN_HUB_DIST
 	jl .fail
 
+	; fog of war: don't pop in on screen.  monsters only spawn
+	; where the player (and heroes) can't currently see
+	mov edi, r12d
+	mov esi, r13d
+	call fow_tile_visible
+	test eax, eax
+	jnz .fail
+
 	; all checks passed - spawn!
 	mov edi, ENT_TYPE_MONSTER
 	mov esi, r12d

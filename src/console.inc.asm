@@ -20,6 +20,7 @@ section .data
 	cmd_name_siege		db "siege", 0
 	cmd_name_spawnrate	db "spawn_rate", 0
 	cmd_name_cap		db "cap", 0
+	cmd_name_fow		db "fow", 0
 
 	; command table: pairs of (name_ptr, handler_ptr),NULL-terminated
 	; the order is the order 'help' lists them in
@@ -32,6 +33,7 @@ section .data
 		dq cmd_name_siege,		cmd_handler_siege_fn
 		dq cmd_name_spawnrate,	cmd_handler_spawnrate_fn
 		dq cmd_name_cap,		cmd_handler_cap_fn
+		dq cmd_name_fow,		cmd_handler_fow_fn
 		dq cmd_name_quit,		cmd_handler_quit_fn
 		dq 0, 0	; sentinel
 
@@ -435,6 +437,10 @@ cmd_handler_hud_fn:
 cmd_handler_quit_fn:
 	mov byte [key_quit], 1
 	ret
+
+; fow - cheat that reveals the whole map (toggle)
+cmd_handler_fow_fn:
+	jmp fow_toggle_reveal_all
 
 ; siege on|off|toggle
 cmd_handler_siege_fn:

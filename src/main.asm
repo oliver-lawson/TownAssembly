@@ -15,6 +15,7 @@ default rel
 %include "ai.inc.asm"
 %include "shadow.inc.asm"
 %include "entity_player.inc.asm"
+%include "fogofwar.inc.asm"
 %include "reflect.inc.asm"
 %include "daynight.inc.asm"
 %include "worldgen.inc.asm"
@@ -128,6 +129,7 @@ main:
 	call inv_init				; set up inventory
 	call daynight_reset
 	call safezone_recompute		; initial mask
+	call fow_init				; everything starts unseen
 	call pathing_recompute		; flow field from the hub outward
 	call blood_init				; one-time setup of the blood_fb
 								; tex_struct.  must happen before
@@ -305,6 +307,10 @@ main:
 	; in dark tiles, capped at MONSTER_CAP alive
 	call spawn_tick
 
+	; recompute fog of war - demote last frame's visible tiles
+	; then stamp fresh visibility from the player + alive heroes
+	call fow_tick
+
 	; advance the day/night clock
 	call daynight_tick
 
@@ -360,6 +366,10 @@ main:
 
 	; floating action text ("+1 wood" etc)
 	call floattext_draw
+
+
+	; fog of war: tint over unseen/explored tiles
+	call fow_draw_overlay
 
 	; day/night
 	call daynight_apply_tint
@@ -632,6 +642,7 @@ restart_world:
 	call inv_full_reset
 	call daynight_reset
 	call safezone_recompute		; mask is fresh after regen
+	call fow_init				; fresh map - fresh fog
 	call pathing_recompute
 	call blood_clear
 	call dmgfloat_clear
