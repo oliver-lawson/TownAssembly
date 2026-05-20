@@ -376,6 +376,9 @@ main:
 	call daynight_apply_tint
 	call daynight_draw_all_torches
 
+	call draw_lit_flat_objects_overlay
+	call draw_lit_overlay_pass
+
 	; room brighten - tiles inside an enclosed room read brighter
 	call rooms_draw_brighten
 

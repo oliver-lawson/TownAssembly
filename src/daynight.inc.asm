@@ -77,6 +77,12 @@
 ; so they push toward the hub for an attack wave
 %define SIEGE_NIGHT_CHANCE			30
 
+; --- lit-entity overlay ---
+; after the tint pass, entities standing in torch light are redrawn
+; on top so they pop against the warm-glowed ground.  threshold is
+; the min lightmap value at the entity's centre for redraw
+%define LIT_OVERLAY_THRESHOLD		88
+
 section .bss
 	alignb 4
 	day_clock		resd 1
@@ -1822,6 +1828,619 @@ torch_pick_anim_frame:
 torch_atlas_slot:
 	call torch_pick_anim_frame
 	add eax, ATLAS_TORCH_ROW * ATLAS_COLS
+	ret
+
+;================================================================
+; lo_lightmap_rect_max: max lightmap value in screen rect
+;----------------------------------------------------------------
+; clips the rect to the lightmap's bounds, returns 0 if the rect
+; ends up empty (fully offscreen).  used by the lit-overlay
+; functions to decide if a thing sits in a lit-enough patch to
+; warrant being redrawn on top of the night tint
+;----------------------------------------------------------------
+; in:  edi = screen x, esi = screen y, edx = w, ecx = h
+; out: eax = max lightmap value in clipped rect (0 if empty)
+; clobbers: rdi, rsi, rdx, rcx, r8, r9, r10
+;================================================================
+lo_lightmap_rect_max:
+	; clip x: x_lo = max(0, x), x_hi = min(LM_W, x + w)
+	mov r8d, edi				; r8d = x_lo
+	test r8d, r8d
+	jns .lr_xlo_ok
+	xor r8d, r8d
+.lr_xlo_ok:
+	mov r9d, edi
+	add r9d, edx				; r9d = x_hi
+	cmp r9d, LM_W
+	jle .lr_xhi_ok
+	mov r9d, LM_W
+.lr_xhi_ok:
+	cmp r8d, r9d
+	jge .lr_empty
+
+	; clip y: y_lo = max(0, y), y_hi = min(LM_H, y + h)
+	mov edi, esi				; recycle edi = y_lo
+	test edi, edi
+	jns .lr_ylo_ok
+	xor edi, edi
+.lr_ylo_ok:
+	mov edx, esi
+	add edx, ecx				; edx = y_hi 
+	cmp edx, LM_H
+	jle .lr_yhi_ok
+	mov edx, LM_H
+.lr_yhi_ok:
+	cmp edi, edx
+	jge .lr_empty
+
+	; scan rows.  cur_y in edi, y_end in edx; cur_x scan uses r10
+	xor eax, eax				; max so far
+.lr_row:
+	cmp edi, edx
+	jge .lr_done
+	mov r10d, r8d				; cur_x = x_lo
+	; row start ptr: lightmap + y*LM_W + x_lo
+	mov ecx, edi
+	imul ecx, LM_W
+	add ecx, r10d
+	lea rsi, [lightmap]
+	add rsi, rcx				; rsi = &lightmap[y*W + x_lo]
+.lr_col:
+	cmp r10d, r9d
+	jge .lr_row_done
+	movzx ecx, byte [rsi]
+	cmp ecx, eax
+	jle .lr_no_new_max
+	mov eax, ecx
+	cmp eax, 255
+	je .lr_done					; can't get any brighter, bail
+.lr_no_new_max:
+	inc rsi
+	inc r10d
+	jmp .lr_col
+.lr_row_done:
+	inc edi
+	jmp .lr_row
+
+.lr_empty:
+	xor eax, eax
+.lr_done:
+	ret
+
+;================================================================
+; draw_lit_flat_objects_overlay: redraw lit flat objects on top
+; of the night tint
+;----------------------------------------------------------------
+; flat objects (beds, doors, chairs, torches atm) are drawn in
+; draw_objects BEFORE the entity pass.  by the time the tint
+; runs, they've been darkened along with the ground.  this pass
+; scans the visible tile region and re-blits any flat object
+; whose tile is sufficiently lit on top
+;
+; mirrors draw_objects' dispatch (autotile / torch / static) and
+; loop bounds.  tall objects (trees, walls) are handled by
+; draw_lit_overlay_pass since they y-sort with entities
+;
+; bails early in daylight
+;================================================================
+draw_lit_flat_objects_overlay: 
+	push rbp
+	mov rbp, rsp
+	push rbx
+	push r12
+	push r13
+	push r14
+	push r15
+	sub rsp, 48
+
+	; locals (mirroring draw_objects):
+	;	[rbp-4]  ty
+	;	[rbp-8]  tx
+	;	[rbp-20] ty_min
+	;	[rbp-24] ty_max
+	;	[rbp-28] tx_min
+	;	[rbp-32] tx_max
+
+	; daytime?  early out 
+	call daynight_get_darkness
+	test eax, eax
+	jz .lf_done
+
+	; tx_min = max(0, camera_x / TILE_SIZE - 1)
+	mov eax, [camera_x]
+	cdq
+	mov ecx, TILE_SIZE
+	idiv ecx
+	test edx, edx
+	jns .lf_txm_ok
+	dec eax
+.lf_txm_ok:
+	dec eax
+	test eax, eax
+	jns .lf_txm_clamped
+	xor eax, eax
+.lf_txm_clamped:
+	mov [rbp-28], eax
+
+	; tx_max = min(MAP_WIDTH, (camera_x + WINDOW_W) / TILE_SIZE + 2)
+	mov eax, [camera_x]
+	add eax, WINDOW_W
+	cdq
+	idiv ecx
+	add eax, 2
+	cmp eax, MAP_WIDTH
+	jle .lf_txx_ok
+	mov eax, MAP_WIDTH
+.lf_txx_ok:
+	mov [rbp-32], eax
+
+	; ty_min / ty_max
+	mov eax, [camera_y]
+	cdq
+	idiv ecx
+	test edx, edx
+	jns .lf_tym_ok
+	dec eax
+.lf_tym_ok:
+	dec eax
+	test eax, eax
+	jns .lf_tym_clamped
+	xor eax, eax
+.lf_tym_clamped:
+	mov [rbp-20], eax
+
+	mov eax, [camera_y]
+	add eax, WINDOW_H
+	cdq
+	idiv ecx
+	add eax, 2
+	cmp eax, MAP_HEIGHT
+	jle .lf_tyx_ok
+	mov eax, MAP_HEIGHT
+.lf_tyx_ok:
+	mov [rbp-24], eax
+
+	; outer loop on ty
+	mov eax, [rbp-20]
+	mov [rbp-4], eax
+.lf_row:
+	mov eax, [rbp-4]
+	cmp eax, [rbp-24]
+	jge .lf_done
+
+	mov eax, [rbp-28]
+	mov [rbp-8], eax
+.lf_col:
+	mov eax, [rbp-8]
+	cmp eax, [rbp-32]
+	jge .lf_next_row
+
+	; obj id from objectmap.  skip empty
+	mov eax, [rbp-4]
+	imul eax, MAP_WIDTH
+	add eax, [rbp-8]
+	lea rbx, [objectmap]
+	movzx r12d, byte [rbx + rax]
+	test r12d, r12d
+	jz .lf_next_col
+
+	; skip tall objects - those go through draw_lit_overlay_pass
+	mov edi, [rbp-8]
+	mov esi, [rbp-4]
+	mov edx, r12d
+	call is_tall_object
+	test eax, eax
+	jnz .lf_next_col
+
+	; --- lit check on this tile ---
+	; screen top-left
+	mov eax, [rbp-8]
+	imul eax, TILE_SIZE
+	sub eax, [camera_x]
+	mov r13d, eax					; r13d = sx (preserved for blit)
+
+	mov eax, [rbp-4]
+	imul eax, TILE_SIZE
+	sub eax, [camera_y]
+	mov r14d, eax					; r14d = sy (preserved for blit)
+
+	mov edi, r13d
+	mov esi, r14d
+	mov edx, TILE_SIZE
+	mov ecx, TILE_SIZE
+	call lo_lightmap_rect_max
+	cmp eax, LIT_OVERLAY_THRESHOLD
+	jl .lf_next_col					; tile dark - leave tinted
+
+	; --- redraw: dispatch + blit (mirrors draw_objects) ---
+	; animated - kjust torch atm
+	cmp r12d, OBJ_TORCH
+	je .lf_torch
+
+	; otherwise static (bed, chair, door atm)
+	mov edi, [rbp-8]
+	mov esi, [rbp-4]
+	mov edx, r12d
+	call nonauto_pick_slot_object
+	jmp .lf_have_slot
+
+.lf_torch:
+	mov edi, [rbp-8]
+	mov esi, [rbp-4]
+	call torch_atlas_slot
+
+.lf_have_slot:
+	mov r15d, eax					; atlas slot
+
+	; slot -> src_x, src_y
+	mov eax, r15d
+	xor edx, edx
+	mov ecx, ATLAS_COLS
+	div ecx
+	imul edx, TILE_SIZE
+	imul eax, TILE_SIZE
+	mov esi, edx					; src_x
+	mov edx, eax					; src_y
+	mov ecx, TILE_SIZE
+	mov r8d, TILE_SIZE
+
+	; dst_x, dst_y from cached screen pos
+	mov r9d, r13d					; dst_x
+	mov eax, r14d					; dst_y in eax for the stack push
+
+	lea rdi, [atlas_tex]
+	mov r10, 0xFFFF00FF
+	push r10
+	push 0							; flip
+	push rax						; dst_y
+	call blit_texture_rect_keyed
+	add rsp, 24
+
+.lf_next_col:
+	inc dword [rbp-8]
+	jmp .lf_col
+.lf_next_row:
+	inc dword [rbp-4]
+	jmp .lf_row
+
+.lf_done:
+	add rsp, 48
+	pop r15
+	pop r14
+	pop r13
+	pop r12
+	pop rbx
+	pop rbp
+	ret
+
+;================================================================
+; lo_maybe_redraw_tall_tile: redraw a tall tile if its area is lit
+;----------------------------------------------------------------
+; takes a tall_tile_list index, samples the lightmap over the
+; tile's TILE_SIZE x TILE_SIZE screen rect.  if max light >=
+; threshold, calls draw_tall_tile_one_idx to re-blit on top of
+; the tint
+;----------------------------------------------------------------
+; in:  edi = tall_tile_list index
+;================================================================
+lo_maybe_redraw_tall_tile:
+	push rbp
+	push rbx
+	push r12
+	sub rsp, 8				; 3 pushes + 8 + ret = 32, aligned
+	mov ebx, edi		; ebx = list index (preserved for blit call)
+
+	; unpack: tall_tile_list[idx] = (sort_y << 16) | cell
+	lea rax, [tall_tile_list]
+	mov eax, [rax + rbx*4]
+	movzx eax, ax				; cell = low 16 bits
+	; tx = cell % MAP_WIDTH, ty = cell / MAP_WIDTH
+	xor edx, edx
+	mov ecx, MAP_WIDTH
+	div ecx						; eax = ty, edx = tx
+
+	; screen top-left = tile world - camera
+	mov r12d, edx
+	imul r12d, TILE_SIZE
+	sub r12d, [camera_x]		; r12d = screen sx
+	imul eax, TILE_SIZE
+	sub eax, [camera_y]			; eax  = screen sy
+
+	; sample max lightmap in (sx, sy, TILE_SIZE, TILE_SIZE)
+	mov edi, r12d
+	mov esi, eax
+	mov edx, TILE_SIZE
+	mov ecx, TILE_SIZE
+	call lo_lightmap_rect_max
+	cmp eax, LIT_OVERLAY_THRESHOLD
+	jl .mt_done					; not lit - leave tinted
+
+	; lit - redraw via the shared tall-tile blit
+	mov edi, ebx
+	lea rsi, [atlas_tex]
+	call draw_tall_tile_one_idx
+
+.mt_done:
+	add rsp, 8
+	pop r12
+	pop rbx
+	pop rbp
+	ret
+
+;================================================================
+; draw_lit_overlay_pass: redraw lit entities + tall tiles on top
+; of the night tint, preserving y-sort
+;----------------------------------------------------------------
+; called after daynight_apply_tint.  walks entity_draw_order and
+; tall_tile_list in the same interleaved order that draw_entities
+; used a few frames ago this same frame - reusing those arrays so
+; we don't need to re-sort
+;
+; for each entity: rect-sample the lightmap around it.  if lit
+; enough, re-blit the sprite at full colour so it pops against
+; the warm-glowed ground
+;
+; for each tall tile (trees, walls atm): rect-sample the lightmap
+; over the tile.  if lit, re-blit via draw_tall_tile_one_idx.
+;
+; bails early in full daylight, ignores stuff in darkness
+;----------------------------------------------------------------
+; the pose-pick + sprite-blit block mirrors draw_entities in
+; entity_player.inc.asm.  kept duplicated rather than factored to
+; a helper since the original juggles r13/r12/rsp state that's
+; too awkward for me to juggle and thread through a call boundary
+;================================================================
+draw_lit_overlay_pass:
+	push rbp
+	mov rbp, rsp
+	push rbx
+	push r12
+	push r13
+	push r14
+	push r15
+	sub rsp, 24			; [rsp]=pose scratch, [rsp+8]=tall_idx
+
+	; daytime?  early out
+	call daynight_get_darkness
+	test eax, eax
+	jz .lo_done
+
+	; --- reuse entity_draw_order + tall_tile_list from this frame's
+	; first draw_entities call.  both are still valid (nothing in
+	; between mutates entities or rebuilds the tall list)
+	mov qword [rsp+8], 0		; tall_idx = 0
+	mov r14d, [entity_count]
+	test r14d, r14d
+	jz .lo_drain_tall			; no entities, still need to flush trees
+	xor r15d, r15d				; loop idx
+
+.lo_next:
+	cmp r15d, r14d
+	jge .lo_drain_tall
+
+	lea rax, [entity_draw_order]
+	movzx ebx, byte [rax + r15]	; ebx = entity idx
+
+	mov edi, ebx
+	call entity_ptr
+	mov r13, rax				; r13 = entity ptr
+
+	; skip dead
+	movzx eax, byte [r13 + ENT_FLAGS_OFFSET]
+	test eax, ENT_FLAG_ALIVE
+	jz .lo_skip
+
+	; --- flush tall tiles whose sort_y <= this entity's y ---
+	; mirrors the interleave in draw_entities so trees / walls
+	; redraw at the right place in z-order. tiles get get a lit
+	; check before draw
+.lo_flush_tall:
+	mov ecx, [rsp+8]			; tall_idx
+	cmp ecx, [tall_tile_count]
+	jge .lo_flush_done
+	mov eax, [r13 + ENT_Y_OFFSET]
+	lea rdx, [tall_tile_list]
+	mov edx, [rdx + rcx*4]		; packed entry
+	shr edx, 16					; sort_y
+	cmp edx, eax
+	jg .lo_flush_done			; this tile sorts after the entity
+	mov edi, ecx
+	call lo_maybe_redraw_tall_tile
+	inc dword [rsp+8]
+	jmp .lo_flush_tall
+.lo_flush_done:
+
+	; --- sample lightmap around entity to find how lit it is ---
+	; we scan a rectangle around the entity centre and take max.
+	;
+	; can't just read the centre pixel.. entities are added as
+	; occluders by torch_build_occluder_list, so they cast shadows
+	; on the lightmap.  the centre falls inside the entity's own
+	; occluder bbox - shadow rasteriser may mark it shadowed.  on
+	; top of that, nearby tile occluders (walls, trees) can shadow
+	; parts of the entity's bbox at certain torch angles, so a few
+	; samples can all happen to land in shadow even when the entity
+	; sits in a clearly-lit patch
+	;aka taking MAX of these means any found lit pixel will work,cool
+	;
+	; cx/cy in callee-saved r12/rbx since they survive the call
+	;
+	; this was hard but worth it, it looks awesome now though it took
+	; a lot of approaches/attempts
+	mov eax, [r13 + ENT_X_OFFSET]
+	sub eax, [camera_x]
+	mov r12d, eax				; r12d = screen cx
+
+	mov eax, [r13 + ENT_Y_OFFSET]
+	sub eax, [camera_y]
+	mov ebx, eax				; ebx = screen cy
+
+	; whole-entity offscreen reject - if even cx+SPRITE_SIZE is off
+	; the left edge (or cx-SPRITE_SIZE off the right), the sprite is
+	; fully invisible.  same for y
+	cmp r12d, -SPRITE_SIZE
+	jl .lo_skip
+	cmp r12d, LM_W + SPRITE_SIZE
+	jge .lo_skip
+	cmp ebx, -SPRITE_SIZE
+	jl .lo_skip
+	cmp ebx, LM_H + SPRITE_SIZE
+	jge .lo_skip
+
+	; scan lightmap in (cx +- half, cy +- half), take max.
+	; half = SPRITE_SIZE/2 covers the sprite footprint
+	mov edi, r12d
+	sub edi, SPRITE_SIZE / 2
+	mov esi, ebx
+	sub esi, SPRITE_SIZE / 2
+	mov edx, SPRITE_SIZE
+	mov ecx, SPRITE_SIZE
+	call lo_lightmap_rect_max
+
+	cmp eax, LIT_OVERLAY_THRESHOLD
+	jl .lo_skip					; not lit enough - leave as-is
+
+	; --- pose pick (mirrors draw_entities) ---
+	movzx eax, byte [r13 + ENT_HIT_TIMER_OFFSET]
+	test eax, eax
+	jnz .lo_pose_hit
+	movzx eax, byte [r13 + ENT_AI_MODE_OFFSET]
+	cmp eax, AI_MODE_FIGHTING
+	jne .lo_pose_walk
+	movzx eax, byte [r13 + ENT_ATTACK_TICKS_OFFSET]
+	cmp eax, ATTACK_PERIOD - ATTACK_POSE_FRAMES
+	jle .lo_pose_walk
+	cmp eax, ATTACK_PERIOD - (ATTACK_POSE_FRAMES / 2)
+	jle .lo_pose_atk_b
+	mov dword [rsp], 1			; row 1 = attack A
+	jmp .lo_pose_have_row
+.lo_pose_atk_b:
+	mov dword [rsp], 2			; row 2 = attack B
+	jmp .lo_pose_have_row
+.lo_pose_hit:
+	mov dword [rsp], 3			; row 3 = hit
+	jmp .lo_pose_have_row
+.lo_pose_walk:
+	mov dword [rsp], 0			; row 0 = walk
+.lo_pose_have_row:
+
+	; --- pick col + flip ---
+	movzx r12d, byte [r13 + ENT_SLOT_OFFSET]
+	movzx eax, byte [r13 + ENT_FACING_OFFSET]
+
+	cmp dword [rsp], 0
+	jne .lo_non_walk
+
+	cmp eax, FACE_DOWN
+	je .lo_pp_down
+	cmp eax, FACE_UP
+	je .lo_pp_up
+	cmp eax, FACE_LEFT
+	je .lo_pp_left
+	; right
+	add r12d, 2
+	movzx edx, byte [r13 + ENT_PHASE_OFFSET]
+	add r12d, edx
+	mov ecx, 1
+	jmp .lo_pose_done
+.lo_pp_left:
+	add r12d, 2
+	movzx edx, byte [r13 + ENT_PHASE_OFFSET]
+	add r12d, edx
+	xor ecx, ecx
+	jmp .lo_pose_done
+.lo_pp_down:
+	movzx ecx, byte [r13 + ENT_PHASE_OFFSET]
+	jmp .lo_pose_done
+.lo_pp_up:
+	add r12d, 1
+	movzx ecx, byte [r13 + ENT_PHASE_OFFSET]
+	jmp .lo_pose_done
+
+.lo_non_walk:
+	cmp eax, FACE_DOWN
+	je .lo_nw_down
+	cmp eax, FACE_UP
+	je .lo_nw_up
+	cmp eax, FACE_LEFT
+	je .lo_nw_left
+	add r12d, 2
+	mov ecx, 1
+	jmp .lo_pose_done
+.lo_nw_left:
+	add r12d, 2
+	xor ecx, ecx
+	jmp .lo_pose_done
+.lo_nw_down:
+	xor ecx, ecx
+	jmp .lo_pose_done
+.lo_nw_up:
+	add r12d, 1
+	xor ecx, ecx
+.lo_pose_done:
+
+	; pose row -> src_y
+	mov r11d, [rsp]
+	imul r11d, SPRITE_SIZE
+
+	; build the blit call.  same signature as draw_entities:
+	; rdi=tex, esi=src_x, edx=src_y, ecx=src_w, r8d=src_h,
+	; r9d=dst_x, [rbp+16]=dst_y, [rbp+24]=flip, [rbp+32]=key
+	push rcx					; stash flip
+	mov eax, [r13 + ENT_X_OFFSET]
+	sub eax, [camera_x]
+	sub eax, SPRITE_SIZE / 2
+	mov ebx, eax				; dst_x
+
+	mov eax, [r13 + ENT_Y_OFFSET]
+	sub eax, [camera_y]
+	sub eax, SPRITE_SIZE / 2
+	; dst_y goes onto the stack below
+
+	pop rdi
+	movzx edi, dil
+
+	; 3 pushes (24 bytes) -> +8 pad for 16-byte align at call
+	sub rsp, 8
+	mov rcx, SPRITE_COLOR_KEY
+	push rcx					; key
+	push rdi					; flip
+	cdqe
+	push rax					; dst_y
+
+	lea rdi, [sprites_tex]
+	mov esi, r12d
+	imul esi, SPRITE_SIZE		; src_x
+	mov edx, r11d				; src_y
+	mov ecx, SPRITE_SIZE		; src_w
+	mov r8d, SPRITE_SIZE		; src_h
+	mov r9d, ebx				; dst_x
+
+	call blit_texture_rect_keyed
+	add rsp, 32					; 24 args + 8 pad
+
+.lo_skip:
+	inc r15d
+	jmp .lo_next
+
+	; drain any tall tiles that sort south of the southernmost entity
+.lo_drain_tall:
+	mov ecx, [rsp+8]
+	cmp ecx, [tall_tile_count]
+	jge .lo_done
+	mov edi, ecx
+	call lo_maybe_redraw_tall_tile
+	inc dword [rsp+8]
+	jmp .lo_drain_tall
+
+.lo_done:
+	add rsp, 24
+	pop r15
+	pop r14
+	pop r13
+	pop r12
+	pop rbx
+	pop rbp
 	ret
 
 %endif
