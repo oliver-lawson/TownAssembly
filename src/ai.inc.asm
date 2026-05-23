@@ -1150,45 +1150,79 @@ ai_attack_tick:
 	cmp eax, FIGHT_RANGE_PX
 	jg .out	; nope, out of range, skip meleeattack
 
-	; deal damage
+	; deal damage - save victim idx in ebx (we don't need self_idx
+	; here any more; r12 still holds the self ptr)
+	movzx eax, byte [r12 + ENT_AI_TARGET_OFFSET]
+	mov ebx, eax			; ebx = victim idx, kept across calls
 	movzx eax, byte [r13 + ENT_HP_OFFSET]
 	sub eax, ENGAGE_DAMAGE
 	jg .alive_after
 	mov byte [r13 + ENT_HP_OFFSET], 0
-	; death - splat a single blood mark at this tile
-	; push rdi/rsi for the call args (recomputed-then-discarded so
-	; we don't need them back)
+
+	; --- kill path ---
+	; blood splat at victim's tile
 	mov edi, [r13 + ENT_X_OFFSET]
 	mov esi, [r13 + ENT_Y_OFFSET]
-	sub rsp, 8 ; keepaligned
+	sub rsp, 8			; align
 	call blood_splat_at_pixel
 	add rsp, 8
-	; pop the damage number over the corpse before we kill it (kill
-	; clears flags, but we read x/y from r13 which is still valid)
+
+	; floating damage number above corpse
 	mov edi, [r13 + ENT_X_OFFSET]
 	mov esi, [r13 + ENT_Y_OFFSET]
 	mov edx, ENGAGE_DAMAGE
+	sub rsp, 8
 	call spawn_dmgfloat
-	movzx edi, byte [r12 + ENT_AI_TARGET_OFFSET]
+	add rsp, 8
+
+	; bigger blood burst on kill, in attacker's facing direction
+	mov edi, [r13 + ENT_X_OFFSET]
+	mov esi, [r13 + ENT_Y_OFFSET]
+	movzx edx, byte [r12 + ENT_FACING_OFFSET]
+	sub rsp, 8
+	call particle_burst_hit
+	add rsp, 8
+
+	; kill the victim using the index we saved up top
+	mov edi, ebx
+	sub rsp, 8
 	call entity_kill
-	; clear our target
+	add rsp, 8
+
+	; clear our target + drop to wander
 	mov byte [r12 + ENT_AI_TARGET_OFFSET], AI_TARGET_NONE
-	; drop to wander
 	mov byte [r12 + ENT_AI_MODE_OFFSET], AI_MODE_WANDER
 	mov byte [r12 + ENT_DECISION_TICKS_OFFSET], 0
 	jmp .out
+
 .alive_after:
 	mov byte [r13 + ENT_HP_OFFSET], al
-	; flash the hit pose for HIT_FLASH_FRAMES + splat blood
+	; flash hit pose
 	mov byte [r13 + ENT_HIT_TIMER_OFFSET], HIT_FLASH_FRAMES
+
+	; blood splat
 	mov edi, [r13 + ENT_X_OFFSET]
 	mov esi, [r13 + ENT_Y_OFFSET]
+	sub rsp, 8
 	call blood_splat_at_pixel
-	; damage number floats above the victim
+	add rsp, 8
+
+	; floating damage number (reload edi/esi)
 	mov edi, [r13 + ENT_X_OFFSET]
 	mov esi, [r13 + ENT_Y_OFFSET]
 	mov edx, ENGAGE_DAMAGE
+	sub rsp, 8
 	call spawn_dmgfloat
+	add rsp, 8
+
+	; blood spray, biased by attacker's facing (reload edi/esi -
+	; spawn_dmgfloat mutates esi internally)
+	mov edi, [r13 + ENT_X_OFFSET]
+	mov esi, [r13 + ENT_Y_OFFSET]
+	movzx edx, byte [r12 + ENT_FACING_OFFSET]
+	sub rsp, 8
+	call particle_burst_hit
+	add rsp, 8
 
 .out:
 	pop r13

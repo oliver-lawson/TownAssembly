@@ -8,6 +8,7 @@ default rel
 %include "blit.inc.asm"
 %include "autotile.inc.asm"
 %include "tilemap.inc.asm"
+%include "particles.inc.asm"
 %include "entity.inc.asm"
 %include "camera.inc.asm"
 %include "pathing.inc.asm"
@@ -130,6 +131,7 @@ main:
 	call inv_init				; set up inventory
 	call daynight_reset
 	call safezone_recompute		; initial mask
+	call particles_init
 	call fow_init				; everything starts unseen
 	call pathing_recompute		; flow field from the hub outward
 	call blood_init				; one-time setup of the blood_fb
@@ -308,6 +310,8 @@ main:
 	; in dark tiles, capped at MONSTER_CAP alive
 	call spawn_tick
 
+	call particles_tick
+
 	; recompute fog of war - demote last frame's visible tiles
 	; then stamp fresh visibility from the player + alive heroes
 	call fow_tick
@@ -368,6 +372,7 @@ main:
 	; floating action text ("+1 wood" etc)
 	call floattext_draw
 
+	call particles_draw
 
 	; fog of war: tint over unseen/explored tiles
 	call fow_draw_overlay

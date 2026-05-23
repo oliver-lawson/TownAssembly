@@ -389,16 +389,24 @@ try_player_action:
 	mov esi, [rax + ENT_Y_OFFSET]
 	; rsp at this point: 5 callee-saves (40) + ret (8) = 48 aligned,
 	; with no extra subq.  call directly, no padding needed
+	push rdi
+	push rsi
 	call blood_splat_at_pixel
-	; spawn damage number floats above the corpse - spawn b4 kill
-	; while we can still read x/y; rax was trashed by the call so
-	; re-grab the entity ptr
-	mov edi, r15d
-	call entity_ptr
-	mov edi, [rax + ENT_X_OFFSET]
-	mov esi, [rax + ENT_Y_OFFSET]
+	pop rsi
+	pop rdi
+	; floating damage number above the corpse - rax was trashed by
+	; blood_splat, but rdi/rsi survived our push/pop so we can use
+	; them directly
+	push rdi
+	push rsi
 	mov edx, HIT_DAMAGE
 	call spawn_dmgfloat
+	pop rsi
+	pop rdi
+	; bigger blood burst on kill (spawn_dmgfloat mutates esi
+	; internally, so we re-pop fresh values above)
+	mov edx, [player_facing]
+	call particle_burst_hit
 	mov edi, r15d
 	call entity_kill
 	inc word [player_res_gold]
@@ -411,15 +419,22 @@ try_player_action:
 	mov byte [rax + ENT_HIT_TIMER_OFFSET], HIT_FLASH_FRAMES
 	mov edi, [rax + ENT_X_OFFSET]
 	mov esi, [rax + ENT_Y_OFFSET]
+	; stash x/y - calls below clobber rax + may clobber edi/esi
+	push rdi
+	push rsi
 	call blood_splat_at_pixel
-	; spawn damage number floats above the victim - rax was trashed,
-	; regrab the entity ptr to re-read x/y
-	mov edi, r15d
-	call entity_ptr
-	mov edi, [rax + ENT_X_OFFSET]
-	mov esi, [rax + ENT_Y_OFFSET]
+	pop rsi
+	pop rdi
+	; floating damage number above the victim
+	push rdi
+	push rsi
 	mov edx, HIT_DAMAGE
 	call spawn_dmgfloat
+	pop rsi
+	pop rdi
+	; blood particles spraying away from player (along facing)
+	mov edx, [player_facing]
+	call particle_burst_hit
 	jmp .out
 
 .next_scan:
@@ -452,6 +467,15 @@ try_player_action:
 	inc word [player_res_wood]
 	lea rdi, [floattext_wood]
 	call spawn_floattext
+	; spawn chop particles at tile centre, biased by player facing
+	mov edi, ebx
+	imul edi, TILE_SIZE
+	add edi, TILE_SIZE / 2
+	mov esi, r12d
+	imul esi, TILE_SIZE
+	add esi, TILE_SIZE / 2
+	mov edx, [player_facing]
+	call particle_burst_chop
 	jmp .out_changed
 
 .got_stone:
@@ -466,6 +490,14 @@ try_player_action:
 	inc word [player_res_stone]
 	lea rdi, [floattext_stone]
 	call spawn_floattext
+	; spawn dig particles at tile centre
+	mov edi, ebx
+	imul edi, TILE_SIZE
+	add edi, TILE_SIZE / 2
+	mov esi, r12d
+	imul esi, TILE_SIZE
+	add esi, TILE_SIZE / 2
+	call particle_burst_dig
 	; fallthrough to .out_changed
 
 .out_changed:
