@@ -605,9 +605,10 @@ particle_burst_ring:
 
 	mov [rsp], r8d
 	mov [rsp+4], r9d
-	mov eax, [rsp + 88]
+	; 6 pushes (48) + sub 24 = 72 below entry, plus ret(8) + life(8) = 80
+	mov eax, [rsp + 80]
 	mov [rsp+8], eax			; life
-	mov eax, [rsp + 96]
+	mov eax, [rsp + 88]
 	mov [rsp+12], eax			; extra flags
 	mov dword [rsp+16], 0		; iter
 
@@ -1109,35 +1110,57 @@ particle_burst_splash:
 	push rbx
 	push r12
 	push r13
+	push rbp
+	sub rsp, 8
 	mov r12d, edi
 	mov r13d, esi
 
-	; central flash dot
+	; --- 3 white foam sparks ---
+	mov ebp, 3
+.flash:
+	mov edi, 2
+	call rng_smallrange		; -2..2
+	mov ebx, eax
+
+	mov edi, 1
+	call rng_smallrange
+	sub eax, 2				; -3..-1, biased up
+
+	mov edx, ebx
+	shl edx, 13
+	mov ecx, eax
+	shl ecx, 13
+
 	mov edi, r12d
 	shl edi, 16
 	mov esi, r13d
 	shl esi, 16
-	xor edx, edx
-	xor ecx, ecx
-	mov r8d, 0xFFE0F0FF
-	mov r9d, 0x20E0F0FF
-	push qword P_FLAG_WORLD_SPACE
-	push qword 5
+
+	mov r8d, 0xFFFFFFFF		; pure white
+	mov r9d, 0xFFC0E8FF		; fade to pale blue
+
+	push qword (P_FLAG_RECT | P_FLAG_WORLD_SPACE | P_FLAG_GRAVITY)
+	push qword 10
 	call particle_spawn
 	add rsp, 16
 
-	; ring of droplets
+	dec ebp
+	jnz .flash
+
+	; --- ring of 6 1px droplets ---
 	mov edi, r12d
 	mov esi, r13d
-	mov edx, 8				; count
-	mov ecx, 0x14000		; speed_q
-	mov r8d, 0xFFA8D8FF		; light blue
-	mov r9d, 0x308090C0		; fade to dim
+	mov edx, 6				; count
+	mov ecx, 0x08000		; speed_q
+	mov r8d, 0xFFFFFFFF		; white
+	mov r9d, 0xFFA8D8FF		;  blue
 	push qword (P_FLAG_GRAVITY | P_FLAG_WORLD_SPACE)
-	push qword 18			; life
+	push qword 10			; life
 	call particle_burst_ring
 	add rsp, 16
 
+	add rsp, 8
+	pop rbp
 	pop r13
 	pop r12
 	pop rbx

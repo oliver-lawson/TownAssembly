@@ -399,10 +399,56 @@ entity_sort_draw_order:
 	ret
 
 ;================================================================
+; entity_water_splash_check; spawn every other step on water tiles
+;----------------------------------------------------------------
+; in:  edi = entity index
+;================================================================
+entity_water_splash_check:
+	; 3 pushes = 24 bytes. + return addr 8 = 32bytes off entry rsp
+	; no padding
+	push rbx
+	push r12
+	push r13
+
+	mov ebx, edi
+	call entity_ptr
+	mov r12, rax				; ent ptr
+
+	; tile lookup at entity centre
+	mov eax, [r12 + ENT_X_OFFSET]
+	mov ecx, TILE_SIZE
+	cdq
+	idiv ecx
+	mov r13d, eax				; tx
+	mov eax, [r12 + ENT_Y_OFFSET]
+	cdq
+	idiv ecx
+	mov edi, r13d
+	mov esi, eax
+	call tile_at
+	cmp eax, TILE_WATER
+	jne .out
+
+	mov edi, [r12 + ENT_X_OFFSET]
+	mov esi, [r12 + ENT_Y_OFFSET]
+	add esi, 7					; at feet - see shadow.inc.asm's
+								; SHADOW_Y_OFF, not defined here
+	call particle_burst_splash
+.out:
+	pop r13
+	pop r12
+	pop rbx
+	ret
+
+;================================================================
 ; entity_try_move: player's try_move, but for an entity
 ;----------------------------------------------------------------
 ; in:  edi = entity index, esi = dx, edx = dy
-; out: eax = 1 if the entity actually moved this frame, 0 otherwise
+; out: eax = 0 if the dst is fully blocked (wall/etc - AI should
+;			pick a new direction or sidestep)
+;      eax = 1 if the move attempt is making progress (might have
+;			stepped this frame, or might just be accumulating on
+;			a slow tile like water - either way AI should hold dir)
 ;================================================================
 entity_try_move:
 	push rbx
@@ -443,18 +489,19 @@ entity_try_move:
 	; accumulate
 	add [r15 + ENT_AI_ACCUM_OFFSET], eax
 	cmp dword [r15 + ENT_AI_ACCUM_OFFSET], 100
-	jl .not_yet
+	jl .progressing
 	sub dword [r15 + ENT_AI_ACCUM_OFFSET], 100
 	add [r15 + ENT_X_OFFSET], r13d
 	add [r15 + ENT_Y_OFFSET], r14d
+.progressing:
+	; allow ai to handle 'accumulation' properly and not think it's
+	; blocked.. was wobbling all about on water tiles before
 	mov eax, 1
 	jmp .out
 
 .blocked:
 	; clear accum so a stuck entity doesn't pop on the next free tick
 	mov dword [r15 + ENT_AI_ACCUM_OFFSET], 0
-	; fallthrough as no-move:
-.not_yet:
 	xor eax, eax
 .out:
 	pop r15
@@ -725,6 +772,13 @@ entity_wander_tick:
 	movzx ecx, byte [r13 + ENT_PHASE_OFFSET]
 	xor ecx, 1
 	mov byte [r13 + ENT_PHASE_OFFSET], cl
+	; water splash at footstep cadence - on phase 1 and on water
+	;  ebx is ent index
+	cmp ecx, 1
+	jne .anim_timer_save
+	mov edi, ebx
+	call entity_water_splash_check
+	xor eax, eax				; restore al=0 for the timer save
 .anim_timer_save:
 	mov byte [r13 + ENT_TIMER_OFFSET], al
 	jmp .out

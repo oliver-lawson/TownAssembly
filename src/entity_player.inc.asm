@@ -88,15 +88,19 @@ section .text
 ;================================================================
 ; update_player_input: poll arrow/wasd keys and move/animate
 ;----------------------------------------------------------------
-; runs once per frame.  checks each dir independently for diags
-; sets player_facing to the most-recent pressed dir for now
-; updates player_anim_phase based on whether anything moved
+; runs once per frame.  reads all 4 dir keys into a bitmask, then:
+;	1. ticks move_accum once per frame by tile under's speed
+;	2. if acccum>=100,every held dir gets a step attempt & accum-=100
+;	3. anim cycle whenever any dir is held to keep anim in water
+;	4. splash fx fires if in water
 ;================================================================
 update_player_input:
 	push rbp
 	mov rbp, rsp
+	sub rsp, 16					; [rsp]=key mask, [rsp+4]=tile speed
 
 	mov byte [player_moved], 0
+	mov dword [rsp], 0
 
 	; early return if console/inventory open
 	cmp byte [console_open], 0
@@ -104,88 +108,148 @@ update_player_input:
 	cmp byte [inv_open], 0
 	jne .skip_movement
 
-	; -- left? (left arrow or A) --
+	; build a key-bitmask in [rsp]
+	;	bit 0 = left, 1 = right, 2 = up, 3 = down
 	mov rax, [sdl_keystate]
+
 	movzx ecx, byte [rax + SCANCODE_LEFT]
 	movzx edx, byte [rax + SCANCODE_A]
 	or ecx, edx
 	test ecx, ecx
-	jz .not_left
+	jz .nl
+	or dword [rsp], 0x01
 	mov dword [player_facing], FACE_LEFT
-	mov edi, -move_step
-	xor esi, esi
-	call try_move
-.not_left:
-	; -- right? (right arrow or D) --
-	mov rax, [sdl_keystate]
+.nl:
 	movzx ecx, byte [rax + SCANCODE_RIGHT]
 	movzx edx, byte [rax + SCANCODE_D]
 	or ecx, edx
 	test ecx, ecx
-	jz .not_right
+	jz .nr
+	or dword [rsp], 0x02
 	mov dword [player_facing], FACE_RIGHT
-	mov edi, move_step
-	xor esi, esi
-	call try_move
-.not_right:
-	; -- up? (up arrow or W) --
-	mov rax, [sdl_keystate]
+.nr:
 	movzx ecx, byte [rax + SCANCODE_UP]
 	movzx edx, byte [rax + SCANCODE_W]
 	or ecx, edx
 	test ecx, ecx
-	jz .not_up
+	jz .nu
+	or dword [rsp], 0x04
 	mov dword [player_facing], FACE_UP
-	xor edi, edi
-	mov esi, -move_step
-	call try_move
-.not_up:
-	; -- down? (down arrow or S) --
-	mov rax, [sdl_keystate]
+.nu:
 	movzx ecx, byte [rax + SCANCODE_DOWN]
 	movzx edx, byte [rax + SCANCODE_S]
 	or ecx, edx
 	test ecx, ecx
-	jz .not_down
+	jz .nd
+	or dword [rsp], 0x08
 	mov dword [player_facing], FACE_DOWN
+.nd:
+
+	; no keys held?: skip the accum tick - lets the accum sit at
+	; whatever it was so tapping a direction gives a step right
+	; away, but never builds up infinitely
+	cmp dword [rsp], 0
+	je .skip_movement
+
+	; tick move_accum by the speed at our current pos
+	mov edi, [player_x]
+	mov esi, [player_y]
+	call tile_speed_at_pixel
+	mov [rsp+4], eax
+	add [move_accum], eax
+
+	; need >= 100 to spend a step
+	cmp dword [move_accum], 100
+	jl .skip_movement
+	sub dword [move_accum], 100
+
+	; spend the step credit on every held dir
+	test dword [rsp], 0x01
+	jz .ts_nl
+	mov edi, -move_step
+	xor esi, esi
+	call try_step
+.ts_nl:
+	test dword [rsp], 0x02
+	jz .ts_nr
+	mov edi, move_step
+	xor esi, esi
+	call try_step
+.ts_nr:
+	test dword [rsp], 0x04
+	jz .ts_nu
+	xor edi, edi
+	mov esi, -move_step
+	call try_step
+.ts_nu:
+	test dword [rsp], 0x08
+	jz .ts_nd
 	xor edi, edi
 	mov esi, move_step
-	call try_move
-.not_down:
+	call try_step
+.ts_nd:
+
 .skip_movement:
 
 	; --- animation ---
-	; moved this frame?: tick timer, toggle phase on overflow
-	; idle?: reset to phase 0 so we rest in pose 0
-	cmp byte [player_moved], 0
+	; key held?: tick the anim timer regardless of whether we
+	; actually moved this frame.  lets water anim work
+	; nothing held?: snap to rest pose 0
+	cmp dword [rsp], 0
 	je .anim_idle
+
 	inc dword [player_anim_timer]
 	cmp dword [player_anim_timer], ANIM_PERIOD
 	jl .anim_done
 	mov dword [player_anim_timer], 0
 	xor dword [player_anim_phase], 1
+
+	; splash trigger
+	cmp dword [player_anim_phase], 1
+	jne .anim_done
+
+	mov eax, [player_x]
+	mov ecx, TILE_SIZE
+	cdq
+	idiv ecx
+	mov edi, eax
+	mov eax, [player_y]
+	cdq
+	idiv ecx
+	mov esi, eax
+	push rdi
+	push rsi
+	call tile_at
+	pop rsi
+	pop rdi
+	cmp eax, TILE_WATER
+	jne .anim_done
+	mov edi, [player_x]
+	mov esi, [player_y]
+	add esi, SHADOW_Y_OFF	; splash at feet, matches shadow ellipse
+	call particle_burst_splash
 	jmp .anim_done
+
 .anim_idle:
 	mov dword [player_anim_timer], 0
 	mov dword [player_anim_phase], 0
 .anim_done:
+	add rsp, 16
 	pop rbp
 	ret
 
 ;================================================================
-; try_move: nudge the player by (dx, dy), checking collision
+; try_step: nudge the player by (dx, dy) if dst isn't blocked
 ;----------------------------------------------------------------
-; reads the dst tile's speed%:
-; 0 blocks the move, 100 is full speed
-; partials (eg water at 50) accumulate across calls and apply a
-; step once the accum hits 100. nice slowdowns w/o fractional px
-;
-; if blocked, the accum is cleared so a held direction against a
-; wall doesn't build speed for when the wall ends
+; the slowdown is now managed by the per-frame accumulator in
+; update_player_input.  this just does the dst speed=0 check
+; (walls, trees) and applies the step on pass.  per-axis -
+; callers pass dx and dy in separate calls so we slide along walls
+; and diagonals work
 ;----------------------------------------------------------------
 ; in: edi = dx, esi = dy
 ;================================================================
-try_move:
+try_step:
 	push rbp
 	mov rbp, rsp
 	push rbx
@@ -205,25 +269,11 @@ try_move:
 	test eax, eax
 	jz .blocked
 
-	add [move_accum], eax
-	cmp dword [move_accum], 100
-	jl .not_yet
-
-	; accumulated enough - apply a full step
-	sub dword [move_accum], 100
 	add [player_x], ebx
 	add [player_y], r12d
 	mov byte [player_moved], 1
 
-.not_yet:
-	add rsp, 8
-	pop r12
-	pop rbx
-	pop rbp
-	ret
-
 .blocked:
-	mov dword [move_accum], 0	; reset (see desc)
 	add rsp, 8
 	pop r12
 	pop rbx

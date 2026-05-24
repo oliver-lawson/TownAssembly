@@ -877,6 +877,13 @@ ai_move_in_dir:
 	movzx ecx, byte [r13 + ENT_PHASE_OFFSET]
 	xor ecx, 1
 	mov byte [r13 + ENT_PHASE_OFFSET], cl
+	; water splash on phase=1 - every other anim toggle.  ebx still
+	; holds ent index from the function prologue
+	cmp ecx, 1
+	jne .save_timer
+	mov edi, ebx
+	call entity_water_splash_check
+	xor eax, eax				; restore al=0 for the save below
 .save_timer:
 	mov byte [r13 + ENT_TIMER_OFFSET], al
 	jmp .check_stuck
@@ -1150,31 +1157,19 @@ ai_attack_tick:
 	cmp eax, FIGHT_RANGE_PX
 	jg .out	; nope, out of range, skip meleeattack
 
-	; deal damage - save victim idx in ebx (we don't need self_idx
-	; here any more; r12 still holds the self ptr)
-	movzx eax, byte [r12 + ENT_AI_TARGET_OFFSET]
-	mov ebx, eax			; ebx = victim idx, kept across calls
+	; deal damage
 	movzx eax, byte [r13 + ENT_HP_OFFSET]
 	sub eax, ENGAGE_DAMAGE
 	jg .alive_after
 	mov byte [r13 + ENT_HP_OFFSET], 0
-
-	; --- kill path ---
-	; blood splat at victim's tile
+	; death - splat a single blood mark at this tile
+	; push rdi/rsi for the call args (recomputed-then-discarded so
+	; we don't need them back)
 	mov edi, [r13 + ENT_X_OFFSET]
 	mov esi, [r13 + ENT_Y_OFFSET]
-	sub rsp, 8			; align
+	sub rsp, 8 ; keepaligned
 	call blood_splat_at_pixel
 	add rsp, 8
-
-	; floating damage number above corpse
-	mov edi, [r13 + ENT_X_OFFSET]
-	mov esi, [r13 + ENT_Y_OFFSET]
-	mov edx, ENGAGE_DAMAGE
-	sub rsp, 8
-	call spawn_dmgfloat
-	add rsp, 8
-
 	; bigger blood burst on kill, in attacker's facing direction
 	mov edi, [r13 + ENT_X_OFFSET]
 	mov esi, [r13 + ENT_Y_OFFSET]
@@ -1182,47 +1177,28 @@ ai_attack_tick:
 	sub rsp, 8
 	call particle_burst_hit
 	add rsp, 8
-
-	; kill the victim using the index we saved up top
-	mov edi, ebx
-	sub rsp, 8
+	movzx edi, byte [r12 + ENT_AI_TARGET_OFFSET]
 	call entity_kill
-	add rsp, 8
-
-	; clear our target + drop to wander
+	; clear our target
 	mov byte [r12 + ENT_AI_TARGET_OFFSET], AI_TARGET_NONE
+	; drop to wander
 	mov byte [r12 + ENT_AI_MODE_OFFSET], AI_MODE_WANDER
 	mov byte [r12 + ENT_DECISION_TICKS_OFFSET], 0
 	jmp .out
-
 .alive_after:
 	mov byte [r13 + ENT_HP_OFFSET], al
-	; flash hit pose
+	; flash the hit pose for HIT_FLASH_FRAMES + splat blood
 	mov byte [r13 + ENT_HIT_TIMER_OFFSET], HIT_FLASH_FRAMES
-
-	; blood splat
 	mov edi, [r13 + ENT_X_OFFSET]
 	mov esi, [r13 + ENT_Y_OFFSET]
-	sub rsp, 8
 	call blood_splat_at_pixel
-	add rsp, 8
-
-	; floating damage number (reload edi/esi)
+	; blood spray particles, biased by attacker's facing
 	mov edi, [r13 + ENT_X_OFFSET]
 	mov esi, [r13 + ENT_Y_OFFSET]
 	mov edx, ENGAGE_DAMAGE
-	sub rsp, 8
 	call spawn_dmgfloat
-	add rsp, 8
-
-	; blood spray, biased by attacker's facing (reload edi/esi -
-	; spawn_dmgfloat mutates esi internally)
-	mov edi, [r13 + ENT_X_OFFSET]
-	mov esi, [r13 + ENT_Y_OFFSET]
 	movzx edx, byte [r12 + ENT_FACING_OFFSET]
-	sub rsp, 8
 	call particle_burst_hit
-	add rsp, 8
 
 .out:
 	pop r13
