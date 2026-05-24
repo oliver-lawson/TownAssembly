@@ -2301,21 +2301,74 @@ draw_lit_overlay_pass:
 	jl .lo_skip					; not lit enough - leave as-is
 
 	; --- pose pick (mirrors draw_entities) ---
+	; [rsp+16] / [rsp+20] hold the lunge offset px (dx, dy), 0 if
+	; this entity isn't mid-swing - applied at the blit site below
+	mov dword [rsp+16], 0
+	mov dword [rsp+20], 0
+
 	movzx eax, byte [r13 + ENT_HIT_TIMER_OFFSET]
 	test eax, eax
 	jnz .lo_pose_hit
+
+	; gate the attack-row pose: fighting npc, or any player swing
 	movzx eax, byte [r13 + ENT_AI_MODE_OFFSET]
 	cmp eax, AI_MODE_FIGHTING
+	je .lo_pose_check_window
+	movzx eax, byte [r13 + ENT_TYPE_OFFSET]
+	cmp eax, ENT_TYPE_PLAYER
 	jne .lo_pose_walk
+.lo_pose_check_window:
 	movzx eax, byte [r13 + ENT_ATTACK_TICKS_OFFSET]
 	cmp eax, ATTACK_PERIOD - ATTACK_POSE_FRAMES
 	jle .lo_pose_walk
+
+	;inside the swing window - pick row,then lunge(see draw_entities)
+	mov ecx, eax				; save attack_ticks for lunge calc
 	cmp eax, ATTACK_PERIOD - (ATTACK_POSE_FRAMES / 2)
 	jle .lo_pose_atk_b
 	mov dword [rsp], 1			; row 1 = attack A
-	jmp .lo_pose_have_row
+	jmp .lo_pose_have_lunge
 .lo_pose_atk_b:
 	mov dword [rsp], 2			; row 2 = attack B
+.lo_pose_have_lunge:
+	; ecx still holds attack_ticks
+	sub ecx, ATTACK_PERIOD - ATTACK_POSE_FRAMES		; ecx = t
+	mov eax, ecx
+	sub eax, ATTACK_POSE_FRAMES / 2
+	; abs(eax)
+	cdq
+	xor eax, edx
+	sub eax, edx
+	mov edx, ATTACK_POSE_FRAMES / 2
+	sub edx, eax				; edx = lunge in 0..APF/2
+	; offset_px = edx * LUNGE_PEAK_PX / (ATTACK_POSE_FRAMES/2)
+	imul edx, LUNGE_PEAK_PX
+	mov ecx, ATTACK_POSE_FRAMES / 2
+	mov eax, edx
+	cdq
+	idiv ecx					; eax = offset_px (>=0)
+
+	; direction by facing - route into [rsp+16] (x) or [rsp+20] (y)
+	movzx ecx, byte [r13 + ENT_FACING_OFFSET]
+	cmp ecx, FACE_UP
+	je .lo_lunge_up
+	cmp ecx, FACE_DOWN
+	je .lo_lunge_down
+	cmp ecx, FACE_LEFT
+	je .lo_lunge_left
+	; right
+	mov [rsp+16], eax
+	jmp .lo_pose_have_row
+.lo_lunge_left:
+	neg eax
+	mov [rsp+16], eax
+	jmp .lo_pose_have_row
+.lo_lunge_up:
+	neg eax
+	mov [rsp+20], eax
+	jmp .lo_pose_have_row
+.lo_lunge_down:
+	mov [rsp+20], eax
 	jmp .lo_pose_have_row
 .lo_pose_hit:
 	mov dword [rsp], 3			; row 3 = hit
@@ -2390,11 +2443,13 @@ draw_lit_overlay_pass:
 	mov eax, [r13 + ENT_X_OFFSET]
 	sub eax, [camera_x]
 	sub eax, SPRITE_SIZE / 2
+	add eax, [rsp+24]			; +lunge dx (was [rsp+16] before push)
 	mov ebx, eax				; dst_x
 
 	mov eax, [r13 + ENT_Y_OFFSET]
 	sub eax, [camera_y]
 	sub eax, SPRITE_SIZE / 2
+	add eax, [rsp+28]			; +lunge dy (was [rsp+20] before push)
 	; dst_y goes onto the stack below
 
 	pop rdi
