@@ -1200,6 +1200,12 @@ ai_attack_tick:
 	movzx edx, byte [r12 + ENT_FACING_OFFSET]
 	call particle_burst_hit
 
+	; knock target back along the line from us to them
+	movzx edi, byte [r12 + ENT_AI_TARGET_OFFSET]
+	mov esi, [r12 + ENT_X_OFFSET]
+	mov edx, [r12 + ENT_Y_OFFSET]
+	call knockback_apply
+
 .out:
 	pop r13
 	pop r12

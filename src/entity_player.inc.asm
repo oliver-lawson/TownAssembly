@@ -39,6 +39,12 @@
 %define SPRITE_SIZE			16
 %define SPRITE_COLOR_KEY	0xFFFF00FF
 
+; peak forward lunge for the attack pose, in px
+; the sprite eases out by this much at the midpoint of the swing
+; window then back to 0 - applied at draw time, no collision or pos
+; change
+%define LUNGE_PEAK_PX		3
+
 ; floating text params (feedback above player after gather/kill)
 %define FT_LIFETIME		50
 %define FT_LIFT_PERIOD	6
@@ -299,6 +305,12 @@ try_player_action:
 	push r15
 	; 5 callee-saves + ret = 48 bytes -> 16-aligned
 
+	; start the swing anim - draw_entities checks entity[0]'s
+	; attack_ticks for the player.  this lights up the attack pose
+	; rows + lunge offset whether or not we end up hitting anything.
+	; sync_entity_to_player ticks it down each frame
+	mov byte [entity_table + ENT_ATTACK_TICKS_OFFSET], ATTACK_PERIOD
+
 	; --- compute target tile (tx, ty) ---
 	; player_x/y are pixel-centred on the player
 	; div by TILE_SIZE -> current tile, offset by facing
@@ -485,6 +497,12 @@ try_player_action:
 	; blood particles spraying away from player (along facing)
 	mov edx, [player_facing]
 	call particle_burst_hit
+	; shove the target back, sourced from us (player pos).  r15d
+	; still holds the entity idx of the thing we just hit
+	mov edi, r15d
+	mov esi, [player_x]
+	mov edx, [player_y]
+	call knockback_apply
 	jmp .out
 
 .next_scan:
@@ -844,6 +862,15 @@ sync_entity_to_player:
 	mov byte [rax + ENT_HIT_TIMER_OFFSET], cl
 .ht_done:
 
+	;  try_player_action loads ATTACK_PERIOD onto this,draw_entities 
+	; watches it for the lunge window,then we walk it back down here
+	movzx ecx, byte [rax + ENT_ATTACK_TICKS_OFFSET]
+	test ecx, ecx
+	jz .at_done
+	dec ecx
+	mov byte [rax + ENT_ATTACK_TICKS_OFFSET], cl
+.at_done:
+
 	; flagged dead?
 	movzx ecx, byte [rax + ENT_FLAGS_OFFSET]
 	test ecx, ENT_FLAG_ALIVE
@@ -1149,29 +1176,84 @@ draw_entities:
 	; r12d ends up as (base + col), r14d as pose row, ecx as flip.
 	; [rsp+0] is our scratch slot; we stash the pose row there
 	; since we need r14 free for entity_count
+	; [rsp+16] / [rsp+20] = lunge offset px (dx, dy), 0 if not swinging
 	;
 	; --- pick pose row ---
 	; precedence: hit-flash > attack pose > walk.  attack pose only
-	; applies when actually in FIGHTING mode - otherwise the stale
-	; attack_ticks value from a previous fight (held between mode
-	; transitions, since only ai_attack_tick updates it) locks
-	; fleeing/wandering npcs to attack rows by mistake it turns out!
+	; applies when actually in FIGHTING mode (or to the player, who
+	; pings attack_ticks from try_player_action without ever entering
+	; FIGHTING) - otherwise the stale attack_ticks value from a
+	; previous fight locks fleeing/wandering npcs to attack rows by
+	; mistake it turns out!
+	mov dword [rsp+16], 0			; default lunge dx = 0
+	mov dword [rsp+20], 0			; default lunge dy = 0
+
 	movzx eax, byte [r13 + ENT_HIT_TIMER_OFFSET]
 	test eax, eax
 	jnz .pose_hit
+
+	; gate the attack-row pose: fighting npc, or any player swing
 	movzx eax, byte [r13 + ENT_AI_MODE_OFFSET]
 	cmp eax, AI_MODE_FIGHTING
-	jne .pose_walk				; not fighting -> no attack pose
+	je .pose_check_window
+	movzx eax, byte [r13 + ENT_TYPE_OFFSET]
+	cmp eax, ENT_TYPE_PLAYER
+	jne .pose_walk
+.pose_check_window:
 	movzx eax, byte [r13 + ENT_ATTACK_TICKS_OFFSET]
 	cmp eax, ATTACK_PERIOD - ATTACK_POSE_FRAMES
 	jle .pose_walk				; outside the swing window
-	; inside the swing window.  first half = A, second half = B
+
+	; we are inside the swing window - pick row + work out lunge.
+	; eax holds attack_ticks, which counts down from ATTACK_PERIOD 
+	; as the swing plays out
+	mov ecx, eax				; save attack_ticks for lunge calc
 	cmp eax, ATTACK_PERIOD - (ATTACK_POSE_FRAMES / 2)
 	jle .pose_atk_b
 	mov dword [rsp], 1			; row 1 = attack A
-	jmp .pose_have_row
+	jmp .pose_have_lunge
 .pose_atk_b:
 	mov dword [rsp], 2			; row 2 = attack B
+.pose_have_lunge:
+	; ecx still holds attack_ticks
+	sub ecx, ATTACK_PERIOD - ATTACK_POSE_FRAMES		; ecx = t
+	mov eax, ecx
+	sub eax, ATTACK_POSE_FRAMES / 2
+	; abs(eax)
+	cdq
+	xor eax, edx
+	sub eax, edx
+	mov edx, ATTACK_POSE_FRAMES / 2
+	sub edx, eax				; edx = lunge in 0..APF/2
+	; offset_px = edx * LUNGE_PEAK_PX / (ATTACK_POSE_FRAMES/2)
+	imul edx, LUNGE_PEAK_PX
+	mov ecx, ATTACK_POSE_FRAMES / 2
+	mov eax, edx
+	cdq
+	idiv ecx					; eax = offset_px (>=0)
+
+	; direction by facing.  edi will hold signed offset along axis,
+	; routed into dx or dy slot
+	movzx ecx, byte [r13 + ENT_FACING_OFFSET]
+	cmp ecx, FACE_UP
+	je .lunge_up
+	cmp ecx, FACE_DOWN
+	je .lunge_down
+	cmp ecx, FACE_LEFT
+	je .lunge_left
+	; right
+	mov [rsp+16], eax
+	jmp .pose_have_row
+.lunge_left:
+	neg eax
+	mov [rsp+16], eax
+	jmp .pose_have_row
+.lunge_up:
+	neg eax
+	mov [rsp+20], eax
+	jmp .pose_have_row
+.lunge_down:
+	mov [rsp+20], eax
 	jmp .pose_have_row
 .pose_hit:
 	mov dword [rsp], 3			; row 3 = hit
@@ -1253,11 +1335,13 @@ draw_entities:
 	mov eax, [r13 + ENT_X_OFFSET]
 	sub eax, [camera_x]
 	sub eax, SPRITE_SIZE/2
+	add eax, [rsp+24]			; +lunge dx (was [rsp+16] before push)
 	mov ebx, eax				; ebx = dst_x
 
 	mov eax, [r13 + ENT_Y_OFFSET]
 	sub eax, [camera_y]
 	sub eax, SPRITE_SIZE/2
+	add eax, [rsp+28]			; +lunge dy (was [rsp+20] before push)
 	; dst_y goes into a stack slot below
 
 	; build call args.  blit_texture_rect_keyed signature:

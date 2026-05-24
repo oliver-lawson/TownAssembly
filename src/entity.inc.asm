@@ -150,6 +150,8 @@ entity_clear_all:
 	; clear any cached A* paths too - the entity table just got
 	; wiped, so paths indexed by entity id are meaningless now
 	call entity_path_clear_all
+	; same for knockback side tables and new npcs
+	call knockback_clear_all
 	pop rax
 	pop rcx
 	pop rdi
@@ -261,7 +263,14 @@ entity_spawn:
 ;================================================================
 entity_kill:
 	push rdi
-	call entity_path_clear			; stop drawing path debug dots
+	call entity_path_clear	; stop drawing path debug dots
+	pop rdi
+	; clear knockback so a spawn reusing this slot doesn't start
+	; sliding from a dead entity's leftover state
+	push rdi
+	mov eax, edi			; zero-ext into rax for indexing
+	lea rcx, [entity_kb_ticks]
+	mov byte [rcx + rax], 0
 	pop rdi
 	call entity_ptr
 	mov byte [rax + ENT_FLAGS_OFFSET], 0
@@ -857,6 +866,12 @@ entity_tick_all:
 	je .skip
 	cmp eax, ENT_TYPE_NONE
 	je .skip
+
+	; sliding? skip
+	mov edi, ebx
+	call knockback_tick_entity
+	test eax, eax
+	jnz .skip
 
 	mov edi, ebx
 	call ai_tick

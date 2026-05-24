@@ -10,6 +10,7 @@ default rel
 %include "tilemap.inc.asm"
 %include "particles.inc.asm"
 %include "entity.inc.asm"
+%include "knockback.inc.asm"
 %include "camera.inc.asm"
 %include "pathing.inc.asm"
 %include "astar.inc.asm"
@@ -293,6 +294,12 @@ main:
 	; pull entity[0] back into player_* - mirrors any AI damage dealt
 	; this frame.  if we died, this triggers respawn at the hub
 	call sync_entity_to_player
+
+	; drain any knockback an attacker stamped onto entity[0] this
+	; frame, applying it to player_x/y with per-axis tile checks.
+	; then re-sync so entity_resolve_collisions sees the new pos
+	call player_knockback_tick
+	call sync_player_to_entity
 
 	; slow hp trickle for the player
 	call player_hp_regen_tick
