@@ -81,10 +81,6 @@
 %define TILE_TORCH				13
 %define TILE_COUNT				14
 
-; backwards-compat alias - "the" door from older code is door_ns_c
-%define TILE_WOOD_DOOR			TILE_WOOD_DOOR_NS_C
-
-
 ; -- atlas layout --
 %define ATLAS_COLS			16
 
