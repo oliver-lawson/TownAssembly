@@ -304,4 +304,79 @@ load_ppm_texture:
 	mov eax, -1
 	ret
 
+;================================================================
+; load_ppm_texture_grey: load a P6 PPM and store it as a packed
+; 1-byte-per-pixel greyscale buffer in the texture struct
+;----------------------------------------------------------------
+; uses load_ppm_texture: load as ARGB normally, then
+; allocate a w*h byte buffer, copy the B ito it, free the ARGB
+; buffer, and re-point the tex struct at the small buffer
+;----------------------------------------------------------------
+; in:	rdi = ptr to texture struct
+;		rsi = ptr to null-terminated filename
+; out:	eax = 0 on success, nonzero on fail
+;================================================================
+load_ppm_texture_grey:
+	push rbx
+	push r12
+	push r13
+	push r14
+	push r15
+
+	mov rbx, rdi				; save tex struct ptr
+	call load_ppm_texture
+	test eax, eax
+	jnz .lpg_fail
+
+	; pixel count = w * h
+	mov r12d, [rbx + TEX_WIDTH_OFF]
+	mov r13d, [rbx + TEX_HEIGHT_OFF]
+	imul r12d, r13d				; r12 = pixel count
+
+	; allocate the byte buffer
+	mov edi, r12d
+	call malloc
+	test rax, rax
+	jz .lpg_oom
+
+	mov r14, rax				; r14 = new byte buf
+	mov r15, [rbx + TEX_PIXELS_OFF]	; r15 = old ARGB buf
+
+	; convert: take B (low byte) of each ARGB dword
+	mov ecx, r12d
+	xor edx, edx				; index
+.lpg_loop:
+	mov al, [r15 + rdx*4]		; B of pixel[edx]
+	mov [r14 + rdx], al
+	inc edx
+	dec ecx
+	jnz .lpg_loop
+
+	; free the ARGB buf, swap in the grey buf
+	mov rdi, r15
+	call free
+	mov [rbx + TEX_PIXELS_OFF], r14
+	xor eax, eax				; success?
+	jmp .lpg_done
+
+.lpg_oom:
+	; couldn't allocate the small buffer - free the ARGB
+	; buffer so we don't leak, then null the ptr
+	mov rdi, [rbx + TEX_PIXELS_OFF]
+	call free
+	mov qword [rbx + TEX_PIXELS_OFF], 0
+	mov eax, 1
+	jmp .lpg_done
+
+.lpg_fail:
+	; load_ppm_texture already cleaned up on its own failure
+	mov eax, 1
+.lpg_done:
+	pop r15
+	pop r14
+	pop r13
+	pop r12
+	pop rbx
+	ret
+
 %endif

@@ -765,4 +765,179 @@ blit_texture_rect_reflect:
 	leave
 	ret
 
+;================================================================
+; blit_texture_additive_grey
+;----------------------------------------------------------------
+; blit a greyscale texture (1 byte per pixel) onto the
+; framebuffer additively: for each src texel, add
+; (texel * scale >> 8) to each of R, G, B in the dst pixel,
+; clamping at 255.  zero texels are skipped ((free)
+;----------------------------------------------------------------
+; the texture is blit whole (no source-rect args).  dst is
+; clipped to the framebuffer
+;----------------------------------------------------------------
+; in:	rdi = ptr to greyscale tex_struct
+;		esi = dst_x
+;		edx = dst_y
+;		ecx = scale (0..256 where 256 = full intensity)
+;================================================================
+blit_texture_additive_grey:
+	push rbp
+	mov rbp, rsp
+	push rbx
+	push r12
+	push r13
+	push r14
+	push r15
+	sub rsp, 8					; align
+
+	; unpack tex struct
+	mov r12, [rdi + TEX_PIXELS_OFF]	; src bytes
+	mov r13d, [rdi + TEX_WIDTH_OFF]	; src_w
+	mov r14d, [rdi + TEX_HEIGHT_OFF] ; src_h
+
+	mov r8d, esi				; r8d = dst_x
+	mov r9d, edx				; r9d = dst_y
+	mov r15d, ecx				; r15d = scale
+	; src_x/src_y track tl of the source rect after clipping
+	xor r10d, r10d				; src_x0
+	xor r11d, r11d				; src_y0
+
+	; --- clip left ---
+	test r8d, r8d
+	jns .ag_no_clip_left
+	mov eax, r8d
+	neg eax						; clip amount
+	add r10d, eax
+	sub r13d, eax				; src_w shrinks
+	xor r8d, r8d
+.ag_no_clip_left:
+
+	; --- clip top ---
+	test r9d, r9d
+	jns .ag_no_clip_top
+	mov eax, r9d
+	neg eax
+	add r11d, eax
+	sub r14d, eax
+	xor r9d, r9d
+.ag_no_clip_top:
+
+	; --- clip right ---
+	mov eax, r8d
+	add eax, r13d
+	cmp eax, WINDOW_W
+	jle .ag_no_clip_right
+	mov eax, WINDOW_W
+	sub eax, r8d
+	mov r13d, eax
+.ag_no_clip_right:
+
+	; --- clip bottom ---
+	mov eax, r9d
+	add eax, r14d
+	cmp eax, WINDOW_H
+	jle .ag_no_clip_bottom
+	mov eax, WINDOW_H
+	sub eax, r9d
+	mov r14d, eax
+.ag_no_clip_bottom:
+
+	cmp r13d, 0
+	jle .ag_done
+	cmp r14d, 0
+	jle .ag_done
+
+	; src ptr: r12 + (src_y0 * tex_w + src_x0)
+	; ebx = stride (unclipped tex width)
+	; rdi still the original tex_struct ptr
+	mov ebx, [rdi + TEX_WIDTH_OFF]	; ebx = src stride (tex_w)
+
+	; row 0 src offset
+	mov eax, r11d
+	imul eax, ebx
+	add eax, r10d
+	movsxd rax, eax
+	add r12, rax				; r12 = src cursor (row start)
+
+	; dst ptr: framebuffer + (dst_y * WINDOW_W + dst_x) * 4
+	mov eax, r9d
+	imul eax, WINDOW_W
+	add eax, r8d
+	shl eax, 2
+	lea rdi, [framebuffer]
+	movsxd rax, eax
+	add rdi, rax				; rdi = dst cursor (row start)
+
+.ag_row_loop:
+	; rsi/rdi are scratch row cursors; r12/rdi-base advance
+	; by stride / FB_PITCH after each row
+	mov rsi, r12				; src cursor for this row
+	mov r9, rdi					; dst cursor for this row
+	mov ecx, r13d				; pixel count
+
+.ag_pixel:
+	movzx eax, byte [rsi]		; grey
+	test eax, eax
+	jz .ag_skip					; transparent
+
+	; effective add = (grey * scale) >> 8
+	imul eax, r15d
+	shr eax, 8
+	test eax, eax
+	jz .ag_skip
+	cmp eax, 255
+	jle .ag_add_ok
+	mov eax, 255
+.ag_add_ok:
+	; eax = additive value 1..255
+	; dst is ARGB; bytes at offsets 0=B, 1=G, 2=R, 3=A
+	movzx r8d, byte [r9]		; B
+	add r8d, eax
+	cmp r8d, 255
+	jle .ag_b_ok
+	mov r8d, 255
+.ag_b_ok:
+	mov [r9], r8b
+
+	movzx r8d, byte [r9 + 1]	; G
+	add r8d, eax
+	cmp r8d, 255
+	jle .ag_g_ok
+	mov r8d, 255
+.ag_g_ok:
+	mov [r9 + 1], r8b
+
+	movzx r8d, byte [r9 + 2]	; R
+	add r8d, eax
+	cmp r8d, 255
+	jle .ag_r_ok
+	mov r8d, 255
+.ag_r_ok:
+	mov [r9 + 2], r8b
+
+.ag_skip:
+	inc rsi
+	add r9, 4
+	dec ecx
+	jnz .ag_pixel
+
+	; advance row anchors: src by stride, dst by FB_PITCH
+	movsxd rax, ebx				; sign-extend stride
+	add r12, rax
+	add rdi, FB_PITCH
+
+	dec r14d
+	jnz .ag_row_loop
+
+.ag_done:
+	add rsp, 8
+	pop r15
+	pop r14
+	pop r13
+	pop r12
+	pop rbx
+	pop rbp
+	ret
+
 %endif
