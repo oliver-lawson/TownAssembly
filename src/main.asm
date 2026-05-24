@@ -54,7 +54,7 @@ section .data
 	hud_label_fps		db "fps", 0
 	hud_label_iters		db "iters", 0
 	hud_label_seed		db "seed", 0
-	hud_help			db "` console F3 hud F5 restart F6 safezone F7 flowmap F8 rooms i inv 1-5 hotbar", 0
+	hud_help			db "", 0;"` console F3 hud F5 restart F6 safezone F7 flowmap F8 rooms i inv 1-5 hotbar", 0
 
 	; log messages
 	log_msg_started		db 0x1, " world generated! ", 0x3, 0
